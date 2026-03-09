@@ -9,7 +9,7 @@ This skill takes the current conversation context and codebase understanding and
 
 1. Explore the repo to understand the current state of the codebase, if you haven't already.
 
-2. Use the template below to write the PRD. The PRD should be written in the `prd/prd-name.md` file.
+2. Use the template below to write the PRD. The PRD should be submitted as a GitHub issue.
 
 <prd-template>
 

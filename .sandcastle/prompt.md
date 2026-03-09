@@ -4,7 +4,9 @@ Here are a set of GitHub issues:
 
 !`gh issue list --repo jdg2896/cohort-004-project --state open --json number,title,body,comments`
 
-If all tasks are complete, output <promise>NO MORE TASKS</promise>.
+You will work on the AFK issues only, not the HITL ones.
+
+If all AFK tasks are complete, output <promise>NO MORE TASKS</promise>.
 
 # TASK SELECTION
 

@@ -1,24 +1,28 @@
-# INPUTS
+# ISSUES
 
-Here is a PRD for the feature you need to build:
+Here are a set of GitHub issues:
 
-<prd>
+!`gh issue list --state open --json number,title,body,comments`
 
-!`cat {{ PRD_LOCATION }}`
+If all tasks are complete, output <promise>NO MORE TASKS</promise>.
 
-</prd>
+# TASK SELECTION
 
-And here is the multi-phase plan for it:
+Pick the next task. Prioritize tasks in this order:
 
-<plan>
+1. Critical bugfixes
+2. Development infrastructure
 
-!`cat {{ PLAN_LOCATION }}`
+Getting development infrastructure like tests and types and dev scripts ready is an important precursor to building features.
 
-</plan>
+3. Tracer bullets for new features
 
-Each phase should be considered a single task.
+Tracer bullets are small slices of functionality that go through all layers of the system, allowing you to test and validate your approach early. This helps in identifying potential issues and ensures that the overall architecture is sound before investing significant time in development.
 
-If there are no more tasks to complete, output <promise>NO MORE TASKS</promise>.
+TL;DR - build a tiny, end-to-end slice of the feature first, then expand it out.
+
+4. Polish and quick wins
+5. Refactors
 
 # EXPLORATION
 
@@ -42,6 +46,12 @@ Make a git commit. The commit message must:
 1. Include key decisions made
 2. Include files changed
 3. Blockers or notes for next iteration
+
+# THE ISSUE
+
+If the task is complete, close the original GitHub issue.
+
+If the task is not complete, leave a comment on the GitHub issue with what was done.
 
 # FINAL RULES
 

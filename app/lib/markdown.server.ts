@@ -1,4 +1,5 @@
 import { marked, Renderer } from "marked";
+import sanitizeHtml from "sanitize-html";
 import { type Highlighter, createHighlighter } from "shiki";
 
 let highlighter: Highlighter | null = null;
@@ -35,4 +36,40 @@ export async function renderMarkdown(markdown: string): Promise<string> {
   };
 
   return marked.parse(markdown, { renderer }) as string;
+}
+
+// Renders user-authored Markdown (lesson comments) to HTML, then runs it through
+// an allowlist sanitizer. Unlike renderMarkdown — which is trusted instructor
+// content — comment bodies are untrusted, so we must strip anything that could
+// carry script. The allowlist deliberately keeps Shiki's syntax-highlighting
+// output working: <pre>/<code>/<span> with their class/style/tabindex attributes.
+export async function renderCommentMarkdown(markdown: string): Promise<string> {
+  const html = await renderMarkdown(markdown);
+
+  return sanitizeHtml(html, {
+    allowedTags: sanitizeHtml.defaults.allowedTags.concat(["span", "img"]),
+    allowedAttributes: {
+      ...sanitizeHtml.defaults.allowedAttributes,
+      a: ["href", "name", "target", "rel"],
+      span: ["class", "style"],
+      code: ["class", "style"],
+      pre: ["class", "style", "tabindex"],
+      img: ["src", "alt", "title"],
+    },
+    // Shiki emits inline color / background-color on <pre> and <span>; permit
+    // only those two declarations so highlighting survives sanitization.
+    allowedStyles: {
+      "*": {
+        color: [/.*/],
+        "background-color": [/.*/],
+      },
+    },
+    // Force user links to be safe: no referrer leakage, no SEO juice, new tab.
+    transformTags: {
+      a: sanitizeHtml.simpleTransform("a", {
+        rel: "noopener noreferrer nofollow",
+        target: "_blank",
+      }),
+    },
+  });
 }

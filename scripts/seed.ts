@@ -11,6 +11,7 @@ import {
   LessonProgressStatus,
   QuestionType,
   TeamMemberRole,
+  CommentModerationAction,
 } from "../app/db/schema";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -45,6 +46,8 @@ async function seed() {
 
   // Drop and recreate tables for a clean seed
   sqlite.exec(`
+    DROP TABLE IF EXISTS comment_moderation_actions;
+    DROP TABLE IF EXISTS lesson_comments;
     DROP TABLE IF EXISTS video_watch_events;
     DROP TABLE IF EXISTS quiz_answers;
     DROP TABLE IF EXISTS quiz_attempts;
@@ -1418,6 +1421,138 @@ You've completed the Building REST APIs course. You now have the skills to build
     .run();
 
   console.log("Created 6 course reviews.");
+
+  // ─── Lesson Comments ───
+  // Threaded Q&A on Course 1 lessons: student questions with Sarah Chen
+  // (instructor) replies, plus a couple of removed (tombstoned) threads.
+
+  function addComment(
+    lessonId: number,
+    userId: number,
+    body: string,
+    parentId: number | null,
+    createdDaysAgo: number,
+    opts?: {
+      deletedAt?: string | null;
+      removalReason?: string | null;
+      updatedDaysAgo?: number;
+    }
+  ) {
+    const [comment] = db
+      .insert(schema.lessonComments)
+      .values({
+        lessonId,
+        userId,
+        parentId,
+        body,
+        deletedAt: opts?.deletedAt ?? null,
+        removalReason: opts?.removalReason ?? null,
+        createdAt: daysAgo(createdDaysAgo),
+        updatedAt: daysAgo(opts?.updatedDaysAgo ?? createdDaysAgo),
+      })
+      .returning()
+      .all();
+    return comment;
+  }
+
+  const lessonIntro = course1LessonIds[0]; // "What is TypeScript?"
+  const lessonInstall = course1LessonIds[1]; // "Installing and Configuring TypeScript"
+
+  // Thread 1 — Emma asks, Sarah answers.
+  const t1 = addComment(
+    lessonIntro,
+    students[0].id,
+    "Quick question — is TypeScript only worth it for large projects, or is it useful for small scripts too?",
+    null,
+    7
+  );
+  addComment(
+    lessonIntro,
+    instructor1.id,
+    "Great question! Even small scripts benefit — autocompletion and catching typos early saves time. I reach for it on one-off scripts all the time.",
+    t1.id,
+    6
+  );
+
+  // Thread 2 — James asks, Sarah answers.
+  const t2 = addComment(
+    lessonIntro,
+    students[1].id,
+    "Does TypeScript add any **runtime** overhead once it's compiled?",
+    null,
+    5
+  );
+  addComment(
+    lessonIntro,
+    instructor1.id,
+    "Nope — types are fully erased at compile time. The output is plain JavaScript with zero runtime cost.",
+    t2.id,
+    4
+  );
+
+  // Thread 3 — Olivia self-deleted her question (tombstone), but the reply
+  // keeps the thread alive. No reason, no audit (author self-delete).
+  const t3 = addComment(lessonIntro, students[2].id, "[deleted]", null, 8, {
+    deletedAt: daysAgo(3),
+  });
+  addComment(
+    lessonIntro,
+    instructor1.id,
+    "You can absolutely follow along on Windows — just run the same npm commands in PowerShell or WSL.",
+    t3.id,
+    7
+  );
+
+  // Thread 4 — Sophia's off-topic question was removed by Sarah (moderation
+  // soft-delete: tombstone + audit + reason), but a reply survives.
+  const moderationReason =
+    "Let's keep the discussion focused on the lesson topic.";
+  const t4 = addComment(lessonInstall, students[4].id, "[deleted]", null, 6, {
+    deletedAt: daysAgo(2),
+    removalReason: moderationReason,
+  });
+  addComment(
+    lessonInstall,
+    instructor1.id,
+    "Re-posting the on-topic part: you can pin a specific version with `npm install typescript@5.4`.",
+    t4.id,
+    5
+  );
+  db.insert(schema.commentModerationActions)
+    .values({
+      commentId: t4.id,
+      moderatorId: instructor1.id,
+      action: CommentModerationAction.SoftDelete,
+      reason: moderationReason,
+      createdAt: daysAgo(2),
+    })
+    .run();
+
+  // Thread 5 — a spam comment hard-deleted by an admin. The comment row is
+  // gone; only the append-only audit entry remains.
+  const spam = addComment(
+    lessonInstall,
+    students[3].id,
+    "Check out my discount course at spam-link.example!",
+    null,
+    3
+  );
+  db.delete(schema.lessonComments)
+    .where(eq(schema.lessonComments.id, spam.id))
+    .run();
+  db.insert(schema.commentModerationActions)
+    .values({
+      commentId: spam.id,
+      moderatorId: admin.id,
+      action: CommentModerationAction.HardDelete,
+      reason: "Spam / advertising.",
+      createdAt: daysAgo(3),
+    })
+    .run();
+
+  console.log(
+    "Created lesson comments (4 threads + 2 moderation actions: 1 soft, 1 hard)."
+  );
 
   // ─── Lesson Progress ───
 

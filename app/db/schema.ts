@@ -4,6 +4,7 @@ import {
   integer,
   real,
   unique,
+  type AnySQLiteColumn,
 } from "drizzle-orm/sqlite-core";
 
 export enum UserRole {
@@ -32,6 +33,14 @@ export enum QuestionType {
 export enum TeamMemberRole {
   Admin = "admin",
   Member = "member",
+}
+
+// Records how a moderator removed someone else's comment. A soft delete leaves a
+// tombstone behind (because the comment still has replies); a hard delete removes
+// the row entirely (childless comment).
+export enum CommentModerationAction {
+  SoftDelete = "soft_delete",
+  HardDelete = "hard_delete",
 }
 
 // ─── Tables ───
@@ -280,3 +289,49 @@ export const videoWatchEvents = sqliteTable("video_watch_events", {
     .notNull()
     .$defaultFn(() => new Date().toISOString()),
 });
+
+// Threaded lesson discussion. Single self-referencing table, one level deep:
+// top-level comments have parentId = null, replies point at a top-level comment.
+// The one-level depth rule is enforced in commentService, not the database.
+// A soft-deleted (tombstoned) comment keeps its row with deletedAt set so its
+// replies remain visible; childless deletes remove the row outright.
+export const lessonComments = sqliteTable("lesson_comments", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  lessonId: integer("lesson_id")
+    .notNull()
+    .references(() => lessons.id),
+  userId: integer("user_id")
+    .notNull()
+    .references(() => users.id),
+  parentId: integer("parent_id").references(
+    (): AnySQLiteColumn => lessonComments.id
+  ),
+  body: text("body").notNull(),
+  deletedAt: text("deleted_at"),
+  removalReason: text("removal_reason"),
+  createdAt: text("created_at")
+    .notNull()
+    .$defaultFn(() => new Date().toISOString()),
+  updatedAt: text("updated_at")
+    .notNull()
+    .$defaultFn(() => new Date().toISOString()),
+});
+
+// Append-only audit trail for moderator deletions of other users' comments.
+// commentId is intentionally NOT a foreign key so the audit row survives a hard
+// delete of the underlying comment.
+export const commentModerationActions = sqliteTable(
+  "comment_moderation_actions",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    commentId: integer("comment_id").notNull(),
+    moderatorId: integer("moderator_id")
+      .notNull()
+      .references(() => users.id),
+    action: text("action").notNull().$type<CommentModerationAction>(),
+    reason: text("reason"),
+    createdAt: text("created_at")
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  }
+);

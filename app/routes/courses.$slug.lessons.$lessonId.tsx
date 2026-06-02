@@ -9,7 +9,19 @@ import {
 import { getLessonById } from "~/services/lessonService";
 import { getModuleById } from "~/services/moduleService";
 import { getCurrentUserId } from "~/lib/session";
+import { getUserById } from "~/services/userService";
 import { isUserEnrolled } from "~/services/enrollmentService";
+import {
+  countTopLevelComments,
+  getCommentThreads,
+  createComment,
+  createReply,
+  editComment,
+  deleteComment,
+  moderateDeleteComment,
+  getComment,
+  type CommentThread,
+} from "~/services/commentService";
 import {
   getLessonProgress,
   getLessonProgressForCourse,
@@ -26,8 +38,9 @@ import {
   getBestAttempt,
 } from "~/services/quizService";
 import { computeResult } from "~/services/quizScoringService";
-import { LessonProgressStatus } from "~/db/schema";
+import { LessonProgressStatus, UserRole } from "~/db/schema";
 import { Button } from "~/components/ui/button";
+import { Textarea } from "~/components/ui/textarea";
 import { Card, CardContent } from "~/components/ui/card";
 import {
   AlertTriangle,
@@ -40,14 +53,19 @@ import {
   Github,
   HelpCircle,
   MapPin,
+  MessageSquare,
+  Pencil,
   PlayCircle,
+  Reply,
   ShieldAlert,
+  Trash2,
   XCircle,
   Trophy,
   RotateCcw,
 } from "lucide-react";
 import { cn, formatDuration } from "~/lib/utils";
-import { renderMarkdown } from "~/lib/markdown.server";
+import { renderMarkdown, renderCommentMarkdown } from "~/lib/markdown.server";
+import { UserAvatar } from "~/components/user-avatar";
 import { YouTubePlayer } from "~/components/youtube-player";
 import { data, isRouteErrorResponse } from "react-router";
 import { z } from "zod";
@@ -64,6 +82,127 @@ const lessonParamsSchema = z.object({
 const markCompleteSchema = z.object({
   intent: z.literal("mark-complete"),
 });
+
+// ─── Comments ───
+
+const COMMENTS_PAGE_SIZE = 5;
+
+const commentBodySchema = z
+  .string()
+  .trim()
+  .min(1, "Comment cannot be empty.")
+  .max(5000, "Comment cannot exceed 5000 characters.");
+
+const createCommentSchema = z.object({
+  intent: z.literal("create-comment"),
+  body: commentBodySchema,
+  parentId: z.coerce.number().int().optional(),
+});
+
+const editCommentSchema = z.object({
+  intent: z.literal("edit-comment"),
+  commentId: z.coerce.number().int(),
+  body: commentBodySchema,
+});
+
+const deleteCommentSchema = z.object({
+  intent: z.literal("delete-comment"),
+  commentId: z.coerce.number().int(),
+  // Optional moderation reason; only used when a moderator removes another
+  // user's comment.
+  reason: z.string().trim().max(500).optional(),
+});
+
+const loadCommentsSchema = z.object({
+  intent: z.literal("load-comments"),
+  offset: z.coerce.number().int().min(0),
+});
+
+// The per-viewer view of a comment. Permissions and rendered HTML are computed
+// server-side so the same shape flows from both the loader (first page) and the
+// load-comments action (subsequent pages).
+export type CommentView = {
+  id: number;
+  parentId: number | null;
+  authorId: number;
+  authorName: string;
+  authorAvatarUrl: string | null;
+  authorIsCourseInstructor: boolean;
+  authorIsAdmin: boolean;
+  bodyHtml: string | null;
+  rawBody: string | null;
+  isDeleted: boolean;
+  removalReason: string | null;
+  createdAt: string;
+  edited: boolean;
+  canEdit: boolean;
+  canDelete: boolean;
+  canModerate: boolean;
+  replies: CommentView[];
+};
+
+type ViewerContext = {
+  userId: number;
+  isAdmin: boolean;
+  canModerate: boolean;
+  courseInstructorId: number;
+};
+
+async function commentRowToView(
+  row: CommentThread["replies"][number],
+  viewer: ViewerContext
+): Promise<CommentView> {
+  const isDeleted = row.deletedAt !== null;
+  const isAuthor = viewer.userId === row.authorId;
+  const canEdit = isAuthor && !isDeleted;
+  const reasonVisible =
+    (isAuthor || viewer.isAdmin) && row.removalReason
+      ? row.removalReason
+      : null;
+
+  return {
+    id: row.id,
+    parentId: row.parentId,
+    authorId: row.authorId,
+    authorName: row.authorName,
+    authorAvatarUrl: row.authorAvatarUrl,
+    authorIsCourseInstructor: row.authorId === viewer.courseInstructorId,
+    authorIsAdmin: row.authorRole === UserRole.Admin,
+    bodyHtml: isDeleted ? null : await renderCommentMarkdown(row.body),
+    rawBody: canEdit ? row.body : null,
+    isDeleted,
+    removalReason: reasonVisible,
+    createdAt: row.createdAt,
+    edited:
+      !isDeleted &&
+      new Date(row.updatedAt).getTime() > new Date(row.createdAt).getTime(),
+    canEdit,
+    canDelete: canEdit,
+    canModerate: viewer.canModerate && !isAuthor && !isDeleted,
+    replies: [],
+  };
+}
+
+// Builds one page of comment views (top-level threads + their replies).
+async function buildCommentViews(
+  lessonId: number,
+  viewer: ViewerContext,
+  offset: number
+): Promise<{ threads: CommentView[]; hasMore: boolean }> {
+  const threads = getCommentThreads(lessonId, COMMENTS_PAGE_SIZE, offset);
+  const views = await Promise.all(
+    threads.map(async (thread) => {
+      const top = await commentRowToView(thread, viewer);
+      top.replies = await Promise.all(
+        thread.replies.map((reply) => commentRowToView(reply, viewer))
+      );
+      return top;
+    })
+  );
+
+  const total = countTopLevelComments(lessonId);
+  return { threads: views, hasMore: offset + threads.length < total };
+}
 
 export function meta({ data: loaderData }: Route.MetaArgs) {
   const title = loaderData?.lesson?.title ?? "Lesson";
@@ -248,12 +387,53 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     }
   }
 
+  // ─── Comments ───
+  // Read + write access: enrolled students, plus the course instructor and
+  // admins who bypass enrollment. (PPP blocking already short-circuits the
+  // lesson UI above, so comments need no extra PPP handling.)
+  // Moderation (removing other users' comments) is admin-only — instructors can
+  // read/post like any participant but cannot remove others' comments. This can
+  // later be extended to a dedicated moderator role.
+  const courseInstructorId = course.instructorId;
+  const currentUser = currentUserId ? getUserById(currentUserId) : null;
+  const isAdmin = currentUser?.role === UserRole.Admin;
+  const isCourseInstructor =
+    !!currentUserId && courseInstructorId === currentUserId;
+  const canModerateComments = !!currentUserId && isAdmin;
+  const canAccessComments =
+    !!currentUserId && (enrolled || isAdmin || isCourseInstructor);
+
+  let comments: {
+    threads: CommentView[];
+    hasMore: boolean;
+    count: number;
+    canModerate: boolean;
+  } | null = null;
+
+  if (canAccessComments && currentUserId) {
+    const viewer: ViewerContext = {
+      userId: currentUserId,
+      isAdmin,
+      canModerate: canModerateComments,
+      courseInstructorId,
+    };
+    const page = await buildCommentViews(lesson.id, viewer, 0);
+    comments = {
+      threads: page.threads,
+      hasMore: page.hasMore,
+      count: countTopLevelComments(lesson.id),
+      canModerate: canModerateComments,
+    };
+  }
+
   return {
     course: {
       id: courseWithDetails.id,
       title: courseWithDetails.title,
       slug: courseWithDetails.slug,
     },
+    comments,
+    canAccessComments,
     curriculum: courseWithDetails.modules.map((m) => ({
       id: m.id,
       title: m.title,
@@ -331,6 +511,144 @@ export async function action({ params, request }: Route.ActionArgs) {
     return { quizResult: result };
   }
 
+  // ─── Comment intents ───
+  // Write access mirrors the loader: enrolled students, plus the course
+  // instructor and admins who bypass enrollment.
+  if (
+    intent === "create-comment" ||
+    intent === "edit-comment" ||
+    intent === "delete-comment" ||
+    intent === "load-comments"
+  ) {
+    const currentUser = getUserById(currentUserId);
+    const isAdmin = currentUser?.role === UserRole.Admin;
+    const isCourseInstructor = course.instructorId === currentUserId;
+    // Moderation is admin-only; instructors keep read/write access (and bypass
+    // enrollment) but cannot remove other users' comments.
+    const canModerateHere = isAdmin;
+    const canWrite =
+      isUserEnrolled(currentUserId, course.id) ||
+      isAdmin ||
+      isCourseInstructor;
+
+    if (!canWrite) {
+      throw data("You don't have access to this lesson's discussion.", {
+        status: 403,
+      });
+    }
+
+    if (intent === "create-comment") {
+      const parsed = parseFormData(formData, createCommentSchema);
+      if (!parsed.success) {
+        return data(
+          { error: Object.values(parsed.errors)[0] ?? "Invalid comment." },
+          { status: 400 }
+        );
+      }
+      try {
+        if (parsed.data.parentId !== undefined) {
+          const parent = getComment(parsed.data.parentId);
+          if (!parent || parent.lessonId !== lessonId) {
+            throw data("Parent comment not found.", { status: 404 });
+          }
+          createReply(parsed.data.parentId, currentUserId, parsed.data.body);
+        } else {
+          createComment(lessonId, currentUserId, parsed.data.body);
+        }
+      } catch (error) {
+        return data(
+          {
+            error:
+              error instanceof Error
+                ? error.message
+                : "Failed to post comment.",
+          },
+          { status: 400 }
+        );
+      }
+      return { success: true };
+    }
+
+    if (intent === "edit-comment") {
+      const parsed = parseFormData(formData, editCommentSchema);
+      if (!parsed.success) {
+        return data(
+          { error: Object.values(parsed.errors)[0] ?? "Invalid comment." },
+          { status: 400 }
+        );
+      }
+      const comment = getComment(parsed.data.commentId);
+      if (!comment || comment.lessonId !== lessonId) {
+        throw data("Comment not found.", { status: 404 });
+      }
+      try {
+        editComment(comment.id, currentUserId, parsed.data.body);
+      } catch (error) {
+        return data(
+          {
+            error:
+              error instanceof Error ? error.message : "Failed to edit comment.",
+          },
+          { status: 400 }
+        );
+      }
+      return { success: true };
+    }
+
+    if (intent === "delete-comment") {
+      const parsed = parseFormData(formData, deleteCommentSchema);
+      if (!parsed.success) {
+        return data(
+          { error: Object.values(parsed.errors)[0] ?? "Invalid request." },
+          { status: 400 }
+        );
+      }
+      const comment = getComment(parsed.data.commentId);
+      if (!comment || comment.lessonId !== lessonId) {
+        throw data("Comment not found.", { status: 404 });
+      }
+      try {
+        if (comment.userId === currentUserId) {
+          // Author self-delete: no reason, no audit.
+          deleteComment(comment.id, currentUserId);
+        } else {
+          // Moderator removing someone else's comment: audited. The service
+          // re-checks moderation rights and throws if unauthorized.
+          moderateDeleteComment(
+            comment.id,
+            currentUserId,
+            parsed.data.reason ?? null
+          );
+        }
+      } catch (error) {
+        return data(
+          {
+            error:
+              error instanceof Error
+                ? error.message
+                : "Failed to delete comment.",
+          },
+          { status: 400 }
+        );
+      }
+      return { success: true };
+    }
+
+    // load-comments: pagination read (load-more fetcher).
+    const parsed = parseFormData(formData, loadCommentsSchema);
+    if (!parsed.success) {
+      throw data("Invalid pagination request.", { status: 400 });
+    }
+    const viewer: ViewerContext = {
+      userId: currentUserId,
+      isAdmin,
+      canModerate: canModerateHere,
+      courseInstructorId: course.instructorId,
+    };
+    const page = await buildCommentViews(lessonId, viewer, parsed.data.offset);
+    return { loadedComments: page };
+  }
+
   throw data("Invalid action", { status: 400 });
 }
 
@@ -369,6 +687,7 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
     module: mod,
     lesson,
     contentHtml,
+    comments,
     lessonStatus,
     enrolled,
     currentUserId,
@@ -590,6 +909,15 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
                 </fetcher.Form>
               )}
             </div>
+          )}
+
+          {/* Discussion */}
+          {comments && currentUserId && (
+            <DiscussionSection
+              comments={comments}
+              lessonId={lesson.id}
+              currentUserId={currentUserId}
+            />
           )}
 
           {/* Prev/Next Navigation */}
@@ -1011,6 +1339,390 @@ function QuizSection({
         </quizFetcher.Form>
       </CardContent>
     </Card>
+  );
+}
+
+function formatCommentDate(iso: string): string {
+  return new Date(iso).toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function AuthorBadges({ comment }: { comment: CommentView }) {
+  return (
+    <>
+      {comment.authorIsCourseInstructor && (
+        <span className="inline-flex items-center rounded-full bg-blue-100 px-2 py-0.5 text-[11px] font-medium text-blue-800 dark:bg-blue-900/30 dark:text-blue-400">
+          Instructor
+        </span>
+      )}
+      {comment.authorIsAdmin && (
+        <span className="inline-flex items-center rounded-full bg-purple-100 px-2 py-0.5 text-[11px] font-medium text-purple-800 dark:bg-purple-900/30 dark:text-purple-400">
+          Admin
+        </span>
+      )}
+    </>
+  );
+}
+
+function CommentComposer({
+  lessonId,
+  parentId,
+  onDone,
+  autoFocus,
+  placeholder,
+}: {
+  lessonId: number;
+  parentId?: number;
+  onDone?: () => void;
+  autoFocus?: boolean;
+  placeholder?: string;
+}) {
+  const fetcher = useFetcher();
+  const [body, setBody] = useState("");
+  const isSubmitting = fetcher.state !== "idle";
+
+  useEffect(() => {
+    if (fetcher.state === "idle" && fetcher.data?.success) {
+      setBody("");
+      onDone?.();
+    }
+    if (fetcher.state === "idle" && fetcher.data?.error) {
+      toast.error(fetcher.data.error);
+    }
+    // onDone intentionally omitted to avoid re-running on parent re-renders
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetcher.state, fetcher.data]);
+
+  return (
+    <fetcher.Form method="post">
+      <input type="hidden" name="intent" value="create-comment" />
+      {parentId !== undefined && (
+        <input type="hidden" name="parentId" value={parentId} />
+      )}
+      <Textarea
+        name="body"
+        value={body}
+        onChange={(e) => setBody(e.target.value)}
+        placeholder={
+          placeholder ??
+          "Ask a question or share your thoughts… (Markdown supported)"
+        }
+        rows={parentId ? 2 : 3}
+        maxLength={5000}
+        autoFocus={autoFocus}
+        required
+      />
+      <div className="mt-2 flex items-center gap-2">
+        <Button
+          type="submit"
+          size="sm"
+          disabled={isSubmitting || body.trim().length === 0}
+        >
+          {isSubmitting ? "Posting…" : parentId ? "Reply" : "Post comment"}
+        </Button>
+        {onDone && (
+          <Button type="button" variant="ghost" size="sm" onClick={onDone}>
+            Cancel
+          </Button>
+        )}
+      </div>
+    </fetcher.Form>
+  );
+}
+
+function CommentItem({
+  comment,
+  lessonId,
+  currentUserId,
+  canModerate,
+  isReply,
+}: {
+  comment: CommentView;
+  lessonId: number;
+  currentUserId: number;
+  canModerate: boolean;
+  isReply: boolean;
+}) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [isReplying, setIsReplying] = useState(false);
+  const editFetcher = useFetcher();
+  const deleteFetcher = useFetcher();
+
+  useEffect(() => {
+    if (editFetcher.state === "idle" && editFetcher.data?.success) {
+      setIsEditing(false);
+    }
+    if (editFetcher.state === "idle" && editFetcher.data?.error) {
+      toast.error(editFetcher.data.error);
+    }
+  }, [editFetcher.state, editFetcher.data]);
+
+  useEffect(() => {
+    if (deleteFetcher.state === "idle" && deleteFetcher.data?.error) {
+      toast.error(deleteFetcher.data.error);
+    }
+  }, [deleteFetcher.state, deleteFetcher.data]);
+
+  function handleDelete() {
+    const isOwn = comment.authorId === currentUserId;
+    if (isOwn) {
+      if (!window.confirm("Delete this comment?")) return;
+      deleteFetcher.submit(
+        { intent: "delete-comment", commentId: String(comment.id) },
+        { method: "post" }
+      );
+    } else {
+      // Moderator removing another user's comment — capture an optional reason.
+      const reason = window.prompt(
+        "Reason for removing this comment (optional). Press Cancel to abort."
+      );
+      if (reason === null) return; // cancelled
+      deleteFetcher.submit(
+        {
+          intent: "delete-comment",
+          commentId: String(comment.id),
+          reason,
+        },
+        { method: "post" }
+      );
+    }
+  }
+
+  const canReply = !isReply && !comment.isDeleted;
+
+  return (
+    <div className="flex gap-3">
+      <UserAvatar
+        name={comment.authorName}
+        avatarUrl={comment.authorAvatarUrl}
+        className="size-8 shrink-0"
+      />
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="text-sm font-semibold">{comment.authorName}</span>
+          <AuthorBadges comment={comment} />
+          <span className="text-xs text-muted-foreground">
+            {formatCommentDate(comment.createdAt)}
+          </span>
+          {comment.edited && (
+            <span className="text-xs text-muted-foreground">(edited)</span>
+          )}
+        </div>
+
+        {isEditing ? (
+          <editFetcher.Form method="post" className="mt-2">
+            <input type="hidden" name="intent" value="edit-comment" />
+            <input type="hidden" name="commentId" value={comment.id} />
+            <Textarea
+              name="body"
+              defaultValue={comment.rawBody ?? ""}
+              rows={3}
+              maxLength={5000}
+              autoFocus
+              required
+            />
+            <div className="mt-2 flex items-center gap-2">
+              <Button
+                type="submit"
+                size="sm"
+                disabled={editFetcher.state !== "idle"}
+              >
+                {editFetcher.state !== "idle" ? "Saving…" : "Save"}
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => setIsEditing(false)}
+              >
+                Cancel
+              </Button>
+            </div>
+          </editFetcher.Form>
+        ) : comment.isDeleted ? (
+          <div className="mt-1">
+            <p className="text-sm italic text-muted-foreground">[deleted]</p>
+            {comment.removalReason && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                Removed by a moderator: {comment.removalReason}
+              </p>
+            )}
+          </div>
+        ) : (
+          <div
+            className="prose prose-sm prose-neutral mt-1 max-w-none dark:prose-invert"
+            dangerouslySetInnerHTML={{ __html: comment.bodyHtml ?? "" }}
+          />
+        )}
+
+        {/* Action row */}
+        {!isEditing && (
+          <div className="mt-2 flex items-center gap-3 text-xs text-muted-foreground">
+            {canReply && (
+              <button
+                type="button"
+                onClick={() => setIsReplying((v) => !v)}
+                className="inline-flex items-center gap-1 hover:text-foreground"
+              >
+                <Reply className="size-3.5" />
+                Reply
+              </button>
+            )}
+            {comment.canEdit && (
+              <button
+                type="button"
+                onClick={() => setIsEditing(true)}
+                className="inline-flex items-center gap-1 hover:text-foreground"
+              >
+                <Pencil className="size-3.5" />
+                Edit
+              </button>
+            )}
+            {(comment.canDelete || comment.canModerate) && (
+              <button
+                type="button"
+                onClick={handleDelete}
+                disabled={deleteFetcher.state !== "idle"}
+                className="inline-flex items-center gap-1 hover:text-destructive"
+              >
+                <Trash2 className="size-3.5" />
+                {comment.canDelete ? "Delete" : "Remove"}
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Reply composer */}
+        {isReplying && (
+          <div className="mt-3">
+            <CommentComposer
+              lessonId={lessonId}
+              parentId={comment.id}
+              autoFocus
+              placeholder="Write a reply… (Markdown supported)"
+              onDone={() => setIsReplying(false)}
+            />
+          </div>
+        )}
+
+        {/* Replies (one level deep) */}
+        {comment.replies.length > 0 && (
+          <ul className="mt-4 space-y-4 border-l border-border pl-4">
+            {comment.replies.map((reply) => (
+              <li key={reply.id}>
+                <CommentItem
+                  comment={reply}
+                  lessonId={lessonId}
+                  currentUserId={currentUserId}
+                  canModerate={canModerate}
+                  isReply
+                />
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DiscussionSection({
+  comments,
+  lessonId,
+  currentUserId,
+}: {
+  comments: {
+    threads: CommentView[];
+    hasMore: boolean;
+    count: number;
+    canModerate: boolean;
+  };
+  lessonId: number;
+  currentUserId: number;
+}) {
+  const initialThreads = comments.threads;
+  const [threads, setThreads] = useState(initialThreads);
+  const [hasMore, setHasMore] = useState(comments.hasMore);
+  const loadFetcher = useFetcher();
+
+  // Reset to the freshly-loaded first page whenever the loader revalidates
+  // (after posting / editing / deleting). Any extra pages from "load more"
+  // collapse back to the first page, which the user can re-expand.
+  useEffect(() => {
+    setThreads(initialThreads);
+    setHasMore(comments.hasMore);
+  }, [initialThreads, comments.hasMore]);
+
+  // Append pages fetched via the load-more fetcher.
+  useEffect(() => {
+    const loaded = loadFetcher.data?.loadedComments;
+    if (loaded) {
+      setThreads((prev) => {
+        const seen = new Set(prev.map((t) => t.id));
+        return [
+          ...prev,
+          ...loaded.threads.filter((t: CommentView) => !seen.has(t.id)),
+        ];
+      });
+      setHasMore(loaded.hasMore);
+    }
+  }, [loadFetcher.data]);
+
+  function loadMore() {
+    loadFetcher.submit(
+      { intent: "load-comments", offset: String(threads.length) },
+      { method: "post" }
+    );
+  }
+
+  return (
+    <section className="mt-12 border-t pt-8">
+      <h2 className="mb-6 flex items-center gap-2 text-2xl font-bold">
+        <MessageSquare className="size-6" />
+        Discussion ({comments.count})
+      </h2>
+
+      <CommentComposer lessonId={lessonId} />
+
+      {threads.length === 0 ? (
+        <p className="py-8 text-center text-muted-foreground">
+          No comments yet. Start the discussion!
+        </p>
+      ) : (
+        <ul className="mt-8 space-y-6">
+          {threads.map((thread) => (
+            <li key={thread.id}>
+              <CommentItem
+                comment={thread}
+                lessonId={lessonId}
+                currentUserId={currentUserId}
+                canModerate={comments.canModerate}
+                isReply={false}
+              />
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {hasMore && (
+        <div className="mt-6 flex justify-center">
+          <Button
+            variant="outline"
+            onClick={loadMore}
+            disabled={loadFetcher.state !== "idle"}
+          >
+            {loadFetcher.state !== "idle"
+              ? "Loading…"
+              : "Load more comments"}
+          </Button>
+        </div>
+      )}
+    </section>
   );
 }
 

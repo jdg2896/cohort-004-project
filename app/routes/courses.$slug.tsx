@@ -9,6 +9,14 @@ import {
 } from "~/services/courseService";
 import { isUserEnrolled } from "~/services/enrollmentService";
 import {
+  getCourseRatingSummary,
+  getUserReview,
+} from "~/services/courseReviewService";
+import {
+  StarRatingDisplay,
+  StarRatingInput,
+} from "~/components/star-rating";
+import {
   calculateProgress,
   getLessonProgressForCourse,
   getNextIncompleteLesson,
@@ -71,6 +79,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   let progress = 0;
   let lessonProgressMap: Record<number, string> = {};
   let nextLessonId: number | null = null;
+  let userRating: number | null = null;
 
   if (currentUserId) {
     enrolled = isUserEnrolled(currentUserId, course.id);
@@ -88,8 +97,12 @@ export async function loader({ params, request }: Route.LoaderArgs) {
 
       const nextLesson = getNextIncompleteLesson(currentUserId, course.id);
       nextLessonId = nextLesson?.id ?? null;
+
+      userRating = getUserReview(currentUserId, course.id)?.rating ?? null;
     }
   }
+
+  const ratingSummary = getCourseRatingSummary(course.id);
 
   // Render sales copy from Markdown to HTML server-side
   const salesCopyHtml = courseWithDetails.salesCopy
@@ -113,6 +126,8 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     currentUserId,
     pppPrice,
     tierInfo,
+    ratingSummary,
+    userRating,
   };
 }
 
@@ -181,6 +196,8 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
     currentUserId,
     pppPrice,
     tierInfo,
+    ratingSummary,
+    userRating,
   } = loaderData;
   const isInstructor = currentUserId === course.instructorId;
   const [searchParams, setSearchParams] = useSearchParams();
@@ -301,7 +318,11 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
         <p className="mb-4 text-lg text-muted-foreground">
           {course.description}
         </p>
-        <div className="flex items-center gap-4 text-sm text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
+          <StarRatingDisplay
+            average={ratingSummary.average}
+            count={ratingSummary.count}
+          />
           <span className="flex items-center gap-1.5">
             <UserAvatar
               name={course.instructorName}
@@ -346,6 +367,18 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
                 Join this course and start learning today.
               </p>
               {enrollButton}
+            </div>
+          )}
+
+          {enrolled && (
+            <div className="mt-8 rounded-lg border bg-muted/50 p-6">
+              <h3 className="mb-1 text-lg font-semibold">Rate this course</h3>
+              <p className="mb-4 text-sm text-muted-foreground">
+                {userRating
+                  ? "Tap a star to update your rating."
+                  : "Share how you'd rate this course with other students."}
+              </p>
+              <StarRatingInput courseId={course.id} currentRating={userRating} />
             </div>
           )}
 

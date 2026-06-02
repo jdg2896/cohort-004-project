@@ -13,6 +13,8 @@ import { getCurrentUserId } from "~/lib/session";
 import { formatPrice } from "~/lib/utils";
 import { getUserEnrolledCourses } from "~/services/enrollmentService";
 import { calculateProgress, getCompletedLessonCount } from "~/services/progressService";
+import { getRatingSummaries } from "~/services/courseReviewService";
+import { StarRatingDisplay } from "~/components/star-rating";
 import { resolveCountry } from "~/lib/country.server";
 import { calculatePppPrice } from "~/lib/ppp";
 
@@ -55,17 +57,22 @@ export async function loader({ request }: Route.LoaderArgs) {
     }
   }
 
+  const ratingSummaries = getRatingSummaries(courses.map((c) => c.id));
+
   const coursesWithLessonCount = courses.map((course) => {
     const userProgress = progressMap.get(course.id);
     const pppPrice = course.pppEnabled
       ? calculatePppPrice(course.price, country)
       : course.price;
+    const rating = ratingSummaries.get(course.id) ?? { average: 0, count: 0 };
     return {
       ...course,
       lessonCount: getLessonCountForCourse(course.id),
       progress: userProgress?.progress ?? null,
       completedLessons: userProgress?.completedLessons ?? null,
       pppPrice,
+      ratingAverage: rating.average,
+      ratingCount: rating.count,
     };
   });
 
@@ -204,6 +211,12 @@ export default function CourseCatalog({ loaderData }: Route.ComponentProps) {
                   <h3 className="text-lg font-semibold leading-tight group-hover:text-primary">
                     {course.title}
                   </h3>
+                  <div className="mt-1.5">
+                    <StarRatingDisplay
+                      average={course.ratingAverage}
+                      count={course.ratingCount}
+                    />
+                  </div>
                 </CardHeader>
                 <CardContent>
                   <p className="line-clamp-2 text-sm text-muted-foreground">

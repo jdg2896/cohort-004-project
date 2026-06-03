@@ -15,28 +15,6 @@ pnpm typecheck    # Run after route/loader changes
 pnpm test         # Run all tests once (Vitest)
 ```
 
-## Function Parameters
-
-When you have a function with more than one parameter with the same type, use an object parameter instead of positional parameters:
-
-```ts
-// BAD
-const addUserToPost = (userId: string, postId: string) => {};
-
-// GOOD
-const addUserToPost = (opts: { userId: string; postId: string }) => {};
-```
-
-## Naming
-
-- **Code:** `camelCase` for variables/functions/properties, `PascalCase` for types/enums/React components, `UPPER_SNAKE_CASE` for constants.
-- **Files:** `kebab-case` for components (`user-avatar.tsx`); `camelCase` for services (`userService.ts`); routes follow React Router's dotted convention.
-- **DB:** `snake_case` SQL column names (`avatar_url`), `camelCase` TS properties (`avatarUrl`) — Drizzle maps between them.
-
-## Testing
-
-Anything file name marked as a 'service' (`authService.ts`) should have tests written for them in an accompanying `.tests.ts` file.
-
 ## Deeper docs
 
 Read these on demand for the task at hand:

@@ -33,6 +33,10 @@ const addUserToPost = (opts: { userId: string; postId: string }) => {};
 - **Files:** `kebab-case` for components (`user-avatar.tsx`); `camelCase` for services (`userService.ts`); routes follow React Router's dotted convention.
 - **DB:** `snake_case` SQL column names (`avatar_url`), `camelCase` TS properties (`avatarUrl`) — Drizzle maps between them.
 
+## Testing
+
+Anything file name marked as a 'service' (`authService.ts`) should have tests written for them in an accompanying `.tests.ts` file.
+
 ## Deeper docs
 
 Read these on demand for the task at hand:

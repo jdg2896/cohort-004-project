@@ -27,6 +27,12 @@ const addUserToPost = (userId: string, postId: string) => {};
 const addUserToPost = (opts: { userId: string; postId: string }) => {};
 ```
 
+## Naming
+
+- **Code:** `camelCase` for variables/functions/properties, `PascalCase` for types/enums/React components, `UPPER_SNAKE_CASE` for constants.
+- **Files:** `kebab-case` for components (`user-avatar.tsx`); `camelCase` for services (`userService.ts`); routes follow React Router's dotted convention.
+- **DB:** `snake_case` SQL column names (`avatar_url`), `camelCase` TS properties (`avatarUrl`) — Drizzle maps between them.
+
 ## Deeper docs
 
 Read these on demand for the task at hand:

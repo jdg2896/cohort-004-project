@@ -318,19 +318,24 @@ export const lessonComments = sqliteTable("lesson_comments", {
 });
 
 // Private per-student bookmarks for lessons. Persist until manually removed
-// (even after lesson completion). One row per (user, lesson) bookmark.
-export const lessonBookmarks = sqliteTable("lesson_bookmarks", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  userId: integer("user_id")
-    .notNull()
-    .references(() => users.id),
-  lessonId: integer("lesson_id")
-    .notNull()
-    .references(() => lessons.id),
-  createdAt: text("created_at")
-    .notNull()
-    .$defaultFn(() => new Date().toISOString()),
-});
+// (even after lesson completion). One row per (user, lesson) bookmark — the
+// unique index backs the toggle's select-then-insert against duplicates.
+export const lessonBookmarks = sqliteTable(
+  "lesson_bookmarks",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id),
+    lessonId: integer("lesson_id")
+      .notNull()
+      .references(() => lessons.id),
+    createdAt: text("created_at")
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (table) => [unique().on(table.userId, table.lessonId)]
+);
 
 // Append-only audit trail for moderator deletions of other users' comments.
 // commentId is intentionally NOT a foreign key so the audit row survives a hard

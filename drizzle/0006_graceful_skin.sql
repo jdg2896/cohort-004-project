@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX `lesson_bookmarks_user_id_lesson_id_unique` ON `lesson_bookmarks` (`user_id`,`lesson_id`);

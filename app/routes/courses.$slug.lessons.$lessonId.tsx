@@ -73,7 +73,7 @@ import { cn, formatDuration } from "~/lib/utils";
 import { renderMarkdown, renderCommentMarkdown } from "~/lib/markdown.server";
 import { UserAvatar } from "~/components/user-avatar";
 import { YouTubePlayer } from "~/components/youtube-player";
-import { data, isRouteErrorResponse } from "react-router";
+import { data, isRouteErrorResponse, redirect } from "react-router";
 import { z } from "zod";
 import { resolveCountry } from "~/lib/country.server";
 import { checkPppAccess, COUNTRIES } from "~/lib/ppp";
@@ -278,7 +278,24 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   }
 
   const currentUserId = await getCurrentUserId(request);
-  let enrolled = false;
+
+  // ─── Lesson access guard ───
+  // Lesson material (video + written content) is gated: only enrolled
+  // students, the course instructor, and admins may view it. Anyone else —
+  // including anonymous visitors — is redirected to the course landing page
+  // where they can enroll. This runs before any lesson content is loaded or
+  // rendered, so the material can't be read by guessing the lesson URL.
+  const currentUser = currentUserId ? getUserById(currentUserId) : null;
+  const isAdmin = currentUser?.role === UserRole.Admin;
+  const isCourseInstructor =
+    !!currentUserId && course.instructorId === currentUserId;
+  const enrolled =
+    !!currentUserId && isUserEnrolled(currentUserId, course.id);
+
+  if (!enrolled && !isAdmin && !isCourseInstructor) {
+    throw redirect(`/courses/${slug}`);
+  }
+
   let lessonStatus: string | null = null;
   let lastWatchPosition = 0;
   let watchProgress = 0;
@@ -286,42 +303,38 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   let bookmarkedLessonIds: number[] = [];
   let isBookmarked = false;
 
-  if (currentUserId) {
-    enrolled = isUserEnrolled(currentUserId, course.id);
+  if (enrolled && currentUserId) {
+    // Mark lesson as in-progress when viewed
+    markLessonInProgress(currentUserId, lessonId);
+    const progress = getLessonProgress(currentUserId, lessonId);
+    lessonStatus = progress?.status ?? null;
 
-    if (enrolled) {
-      // Mark lesson as in-progress when viewed
-      markLessonInProgress(currentUserId, lessonId);
+    // Bookmarks: current lesson state + all bookmarked lessons (for sidebar)
+    bookmarkedLessonIds = getBookmarkedLessonIds({
+      userId: currentUserId,
+      courseId: course.id,
+    });
+    isBookmarked = isLessonBookmarked({ userId: currentUserId, lessonId });
 
-      // Bookmarks: current lesson state + all bookmarked lessons (for sidebar)
-      bookmarkedLessonIds = getBookmarkedLessonIds({
-        userId: currentUserId,
-        courseId: course.id,
-      });
-      isBookmarked = isLessonBookmarked({ userId: currentUserId, lessonId });
-      const progress = getLessonProgress(currentUserId, lessonId);
-      lessonStatus = progress?.status ?? null;
+    // Get progress for all lessons in course (for curriculum sidebar)
+    const progressRecords = getLessonProgressForCourse(
+      currentUserId,
+      course.id
+    );
+    for (const record of progressRecords) {
+      lessonProgressMap[record.lessonId] = record.status;
+    }
 
-      // Get progress for all lessons in course (for curriculum sidebar)
-      const progressRecords = getLessonProgressForCourse(
-        currentUserId,
-        course.id
-      );
-      for (const record of progressRecords) {
-        lessonProgressMap[record.lessonId] = record.status;
-      }
-
-      // Get video watch state for resume and progress display
-      if (lesson.videoUrl) {
-        lastWatchPosition = getLastWatchPosition(currentUserId, lessonId);
-        const videoDurationSeconds = (lesson.durationMinutes ?? 0) * 60;
-        if (videoDurationSeconds > 0) {
-          watchProgress = calculateWatchProgress(
-            currentUserId,
-            lessonId,
-            videoDurationSeconds
-          );
-        }
+    // Get video watch state for resume and progress display
+    if (lesson.videoUrl) {
+      lastWatchPosition = getLastWatchPosition(currentUserId, lessonId);
+      const videoDurationSeconds = (lesson.durationMinutes ?? 0) * 60;
+      if (videoDurationSeconds > 0) {
+        watchProgress = calculateWatchProgress(
+          currentUserId,
+          lessonId,
+          videoDurationSeconds
+        );
       }
     }
   }
@@ -410,10 +423,6 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   // read/post like any participant but cannot remove others' comments. This can
   // later be extended to a dedicated moderator role.
   const courseInstructorId = course.instructorId;
-  const currentUser = currentUserId ? getUserById(currentUserId) : null;
-  const isAdmin = currentUser?.role === UserRole.Admin;
-  const isCourseInstructor =
-    !!currentUserId && courseInstructorId === currentUserId;
   const canModerateComments = !!currentUserId && isAdmin;
   const canAccessComments =
     !!currentUserId && (enrolled || isAdmin || isCourseInstructor);
@@ -494,6 +503,21 @@ export async function action({ params, request }: Route.ActionArgs) {
     throw data("You must be logged in", { status: 401 });
   }
 
+  // Lesson access mirrors the loader: enrolled students, plus the course
+  // instructor and admins who bypass enrollment. Every intent below acts on
+  // gated lesson material (progress, quiz attempts, discussion), so the check
+  // is shared. Moderation (removing others' comments) is further restricted to
+  // admins within the comment block.
+  const currentUser = getUserById(currentUserId);
+  const isAdmin = currentUser?.role === UserRole.Admin;
+  const isCourseInstructor = course.instructorId === currentUserId;
+  const hasLessonAccess =
+    isUserEnrolled(currentUserId, course.id) || isAdmin || isCourseInstructor;
+
+  if (!hasLessonAccess) {
+    throw data("You don't have access to this lesson.", { status: 403 });
+  }
+
   const formData = await request.formData();
   const intent = formData.get("intent");
 
@@ -563,30 +587,16 @@ export async function action({ params, request }: Route.ActionArgs) {
   }
 
   // ─── Comment intents ───
-  // Write access mirrors the loader: enrolled students, plus the course
-  // instructor and admins who bypass enrollment.
+  // Discussion write access is the same lesson access enforced above.
   if (
     intent === "create-comment" ||
     intent === "edit-comment" ||
     intent === "delete-comment" ||
     intent === "load-comments"
   ) {
-    const currentUser = getUserById(currentUserId);
-    const isAdmin = currentUser?.role === UserRole.Admin;
-    const isCourseInstructor = course.instructorId === currentUserId;
     // Moderation is admin-only; instructors keep read/write access (and bypass
     // enrollment) but cannot remove other users' comments.
     const canModerateHere = isAdmin;
-    const canWrite =
-      isUserEnrolled(currentUserId, course.id) ||
-      isAdmin ||
-      isCourseInstructor;
-
-    if (!canWrite) {
-      throw data("You don't have access to this lesson's discussion.", {
-        status: 403,
-      });
-    }
 
     if (intent === "create-comment") {
       const parsed = parseFormData(formData, createCommentSchema);

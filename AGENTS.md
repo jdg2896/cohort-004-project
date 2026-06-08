@@ -15,6 +15,10 @@ pnpm typecheck    # Run after route/loader changes
 pnpm test         # Run all tests once (Vitest)
 ```
 
+# Coding standards
+
+Load the skills that match the area you're touching. For reviews or anything spanning the stack, load all relevant skills.
+
 ## Deeper docs
 
 Read these on demand for the task at hand:

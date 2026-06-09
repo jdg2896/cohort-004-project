@@ -2,6 +2,7 @@ import { eq, and, gte, inArray, sql } from "drizzle-orm";
 import type { AnySQLiteColumn } from "drizzle-orm/sqlite-core";
 import { db } from "~/db";
 import {
+  courses,
   enrollments,
   purchases,
   lessons,
@@ -198,13 +199,25 @@ function weekIndexExpr(column: AnySQLiteColumn, windowStartIso: string) {
 }
 
 /**
- * Weekly revenue and enrollment trends for a course over the last ~12 weeks,
- * zero-filled. Two set-based date-grouped queries (one per table) feed a
- * pre-built zero-filled window, so weeks with no activity are 0 rather than
- * absent.
+ * Weekly revenue and enrollment trends across the given courses over the last
+ * ~12 weeks, zero-filled. Two set-based date-grouped queries (one per table)
+ * feed a pre-built zero-filled window, so weeks with no activity are 0 rather
+ * than absent. Shared by the per-course deep dive (a single course) and the
+ * portfolio overview (all of an instructor's courses); an empty `courseIds`
+ * yields the bare zero-filled window without touching the database.
  */
-export function getCourseTrends(courseId: number): CourseTrends {
-  const { windowStartIso, weekStarts } = computeWeekWindow(new Date());
+function buildWeeklyTrends(courseIds: number[], now: Date): CourseTrends {
+  const { windowStartIso, weekStarts } = computeWeekWindow(now);
+
+  const weeks: WeeklyTrendPoint[] = weekStarts.map((weekStart) => ({
+    weekStart,
+    revenue: 0,
+    enrollments: 0,
+  }));
+
+  // No courses → an all-zero window. Returning early also avoids `inArray` with
+  // an empty list.
+  if (courseIds.length === 0) return { weeks };
 
   const revenueWeek = weekIndexExpr(purchases.createdAt, windowStartIso);
   const revenueRows = db
@@ -215,7 +228,7 @@ export function getCourseTrends(courseId: number): CourseTrends {
     .from(purchases)
     .where(
       and(
-        eq(purchases.courseId, courseId),
+        inArray(purchases.courseId, courseIds),
         gte(purchases.createdAt, windowStartIso)
       )
     )
@@ -231,18 +244,12 @@ export function getCourseTrends(courseId: number): CourseTrends {
     .from(enrollments)
     .where(
       and(
-        eq(enrollments.courseId, courseId),
+        inArray(enrollments.courseId, courseIds),
         gte(enrollments.enrolledAt, windowStartIso)
       )
     )
     .groupBy(enrollmentWeek)
     .all();
-
-  const weeks: WeeklyTrendPoint[] = weekStarts.map((weekStart) => ({
-    weekStart,
-    revenue: 0,
-    enrollments: 0,
-  }));
 
   // Clamp the open upper edge: a row at exactly "now" computes to index
   // TREND_WEEKS, which belongs in the most recent bucket.
@@ -256,6 +263,11 @@ export function getCourseTrends(courseId: number): CourseTrends {
   }
 
   return { weeks };
+}
+
+/** Weekly revenue and enrollment trends for a single course. */
+export function getCourseTrends(courseId: number): CourseTrends {
+  return buildWeeklyTrends([courseId], new Date());
 }
 
 // ─── Lesson-completion funnel ───
@@ -502,4 +514,197 @@ export function getCourseQuizDistributions(
       })),
     };
   });
+}
+
+// ─── Portfolio overview ───
+// Cross-course aggregates for an instructor's whole catalog (PRD Stories 1–12).
+// Everything is computed from a handful of set-based grouped queries scoped to
+// the instructor's courses with `inArray` — never a per-course or per-student
+// loop — then stitched together in memory, so the page stays fast as the
+// catalog grows (Story 39).
+
+export type PortfolioCourseRow = {
+  courseId: number;
+  title: string;
+  /** Enrollment rows for this course. */
+  enrollmentCount: number;
+  /** Gross sum of this course's purchase amounts, in cents. */
+  totalEarnings: number;
+  /**
+   * Share of this course's enrolled students marked complete (0–1), or `null`
+   * when the course has no enrollments, so the caller renders a placeholder.
+   */
+  completionRate: number | null;
+  /**
+   * Mean of students' best-attempt scores across this course's quizzes (0–1),
+   * or `null` when the course has no quiz attempts.
+   */
+  averageQuizScore: number | null;
+};
+
+export type PortfolioAnalytics = {
+  /** Gross earnings across all the instructor's courses, in cents. */
+  totalEarnings: number;
+  /** Sum of enrollment rows across all the instructor's courses. */
+  totalEnrollments: number;
+  /**
+   * Distinct users across all the instructor's enrollments — a learner taking
+   * several of the instructor's courses is counted once, so this differs from
+   * `totalEnrollments` whenever learners overlap.
+   */
+  distinctLearners: number;
+  /**
+   * Mean of the per-course completion rates, over courses that have at least one
+   * enrollment (the average of the comparison table's completion column).
+   * `null` when no course has any enrollment, so the caller renders a neutral
+   * placeholder.
+   */
+  averageCompletion: number | null;
+  /** Per-course comparison rows, ordered by title. */
+  courses: PortfolioCourseRow[];
+};
+
+/** Course ids authored by an instructor. */
+function getInstructorCourseIds(instructorId: number): number[] {
+  return db
+    .select({ id: courses.id })
+    .from(courses)
+    .where(eq(courses.instructorId, instructorId))
+    .all()
+    .map((row) => row.id);
+}
+
+/**
+ * Portfolio snapshot for an instructor: catalog totals, distinct learners,
+ * average completion, and the per-course comparison rows. Scoped to the courses
+ * the instructor authored; a user with no courses gets all-zero totals and an
+ * empty `courses` array so the caller can show a friendly empty state.
+ */
+export function getPortfolioAnalytics(instructorId: number): PortfolioAnalytics {
+  const courseRows = db
+    .select({ id: courses.id, title: courses.title })
+    .from(courses)
+    .where(eq(courses.instructorId, instructorId))
+    .orderBy(courses.title)
+    .all();
+
+  if (courseRows.length === 0) {
+    return {
+      totalEarnings: 0,
+      totalEnrollments: 0,
+      distinctLearners: 0,
+      averageCompletion: null,
+      courses: [],
+    };
+  }
+
+  const courseIds = courseRows.map((c) => c.id);
+
+  // Enrollment count + completed count per course, in one grouped scan.
+  // `count(completedAt)` ignores nulls, so it counts only completed enrollments.
+  const enrollmentRows = db
+    .select({
+      courseId: enrollments.courseId,
+      total: sql<number>`count(*)`,
+      completed: sql<number>`count(${enrollments.completedAt})`,
+    })
+    .from(enrollments)
+    .where(inArray(enrollments.courseId, courseIds))
+    .groupBy(enrollments.courseId)
+    .all();
+
+  // Gross earnings per course, in one grouped scan.
+  const earningsRows = db
+    .select({
+      courseId: purchases.courseId,
+      total: sql<number>`coalesce(sum(${purchases.pricePaid}), 0)`,
+    })
+    .from(purchases)
+    .where(inArray(purchases.courseId, courseIds))
+    .groupBy(purchases.courseId)
+    .all();
+
+  // Distinct learners across the whole catalog, deduped by user in SQL.
+  const learnerRow = db
+    .select({ count: sql<number>`count(distinct ${enrollments.userId})` })
+    .from(enrollments)
+    .where(inArray(enrollments.courseId, courseIds))
+    .get();
+  const distinctLearners = learnerRow?.count ?? 0;
+
+  // Average quiz score per course: the best attempt per student per quiz (one
+  // grouped subquery), joined up to its course and averaged. A single set-based
+  // query — no per-quiz or per-student loop.
+  const best = db
+    .select({
+      quizId: quizAttempts.quizId,
+      best: sql<number>`max(${quizAttempts.score})`.as("best"),
+    })
+    .from(quizAttempts)
+    .groupBy(quizAttempts.quizId, quizAttempts.userId)
+    .as("best");
+
+  const quizScoreRows = db
+    .select({
+      courseId: modules.courseId,
+      average: sql<number>`avg(${best.best})`,
+    })
+    .from(best)
+    .innerJoin(quizzes, eq(best.quizId, quizzes.id))
+    .innerJoin(lessons, eq(quizzes.lessonId, lessons.id))
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .where(inArray(modules.courseId, courseIds))
+    .groupBy(modules.courseId)
+    .all();
+
+  const enrollmentByCourse = new Map(
+    enrollmentRows.map((row) => [row.courseId, row])
+  );
+  const earningsByCourse = new Map(
+    earningsRows.map((row) => [row.courseId, row.total])
+  );
+  const quizScoreByCourse = new Map(
+    quizScoreRows.map((row) => [row.courseId, row.average])
+  );
+
+  const rows: PortfolioCourseRow[] = courseRows.map((course) => {
+    const enrollment = enrollmentByCourse.get(course.id);
+    const total = enrollment?.total ?? 0;
+    const completed = enrollment?.completed ?? 0;
+    return {
+      courseId: course.id,
+      title: course.title,
+      enrollmentCount: total,
+      totalEarnings: earningsByCourse.get(course.id) ?? 0,
+      completionRate: total === 0 ? null : completed / total,
+      averageQuizScore: quizScoreByCourse.get(course.id) ?? null,
+    };
+  });
+
+  const totalEnrollments = rows.reduce((sum, c) => sum + c.enrollmentCount, 0);
+  const totalEarnings = rows.reduce((sum, c) => sum + c.totalEarnings, 0);
+
+  const ratedCourses = rows.filter((c) => c.completionRate !== null);
+  const averageCompletion =
+    ratedCourses.length === 0
+      ? null
+      : ratedCourses.reduce((sum, c) => sum + (c.completionRate ?? 0), 0) /
+        ratedCourses.length;
+
+  return {
+    totalEarnings,
+    totalEnrollments,
+    distinctLearners,
+    averageCompletion,
+    courses: rows,
+  };
+}
+
+/**
+ * Weekly revenue and enrollment trends across all of an instructor's courses,
+ * zero-filled over the ~12-week window. Reuses the per-course trend builder with
+ * the instructor's full course set.
+ */
+export function getPortfolioTrends(instructorId: number): CourseTrends {
+  return buildWeeklyTrends(getInstructorCourseIds(instructorId), new Date());
 }

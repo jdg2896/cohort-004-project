@@ -17,6 +17,8 @@ import {
   getCourseTrends,
   getCourseFunnel,
   getCourseQuizDistributions,
+  getPortfolioAnalytics,
+  getPortfolioTrends,
 } from "./analyticsService";
 
 describe("analyticsService", () => {
@@ -782,6 +784,329 @@ describe("analyticsService", () => {
 
       expect(quiz.passingScore).toBe(0.6);
       expect(quiz.passRate).toBe(1);
+    });
+  });
+
+  // ─── Portfolio overview ───
+
+  describe("portfolio overview", () => {
+    let courseSeq = 0;
+
+    // A second instructor (distinct from base.instructor) with no courses.
+    function makeInstructor(): number {
+      studentSeq += 1;
+      return testDb
+        .insert(schema.users)
+        .values({
+          name: `Instructor ${studentSeq}`,
+          email: `instructor-${studentSeq}@example.com`,
+          role: schema.UserRole.Instructor,
+        })
+        .returning()
+        .get().id;
+    }
+
+    // A published course owned by `instructorId`; slug is auto-unique.
+    function makeCourse(instructorId: number, title: string) {
+      courseSeq += 1;
+      return testDb
+        .insert(schema.courses)
+        .values({
+          title,
+          slug: `portfolio-course-${courseSeq}`,
+          description: "A portfolio course",
+          instructorId,
+          categoryId: base.category.id,
+          status: schema.CourseStatus.Published,
+        })
+        .returning()
+        .get();
+    }
+
+    // Enrolls an existing user (unlike top-level `enroll`, which makes a new one).
+    function enrollUser(userId: number, courseId: number, completedAt?: string) {
+      testDb
+        .insert(schema.enrollments)
+        .values({ userId, courseId, completedAt: completedAt ?? null })
+        .run();
+    }
+
+    function addQuiz(lessonId: number, passingScore: number): number {
+      return testDb
+        .insert(schema.quizzes)
+        .values({ lessonId, title: "Quiz", passingScore })
+        .returning()
+        .get().id;
+    }
+
+    function attempt(userId: number, quizId: number, score: number) {
+      testDb
+        .insert(schema.quizAttempts)
+        .values({ userId, quizId, score, passed: score >= 0.7 })
+        .run();
+    }
+
+    describe("getPortfolioAnalytics", () => {
+      it("returns all-zero totals and an empty course list for an instructor with no courses", () => {
+        const lonely = makeInstructor();
+
+        const result = getPortfolioAnalytics(lonely);
+
+        expect(result.totalEarnings).toBe(0);
+        expect(result.totalEnrollments).toBe(0);
+        expect(result.distinctLearners).toBe(0);
+        expect(result.averageCompletion).toBeNull();
+        expect(result.courses).toEqual([]);
+      });
+
+      it("sums enrollments and earnings across the instructor's courses", () => {
+        const course2 = makeCourse(base.instructor.id, "Second Course");
+
+        enroll(base.course.id);
+        enroll(base.course.id);
+        enroll(course2.id);
+        purchase(base.course.id, 5000);
+        purchase(course2.id, 2500);
+
+        const result = getPortfolioAnalytics(base.instructor.id);
+
+        expect(result.totalEnrollments).toBe(3);
+        expect(result.totalEarnings).toBe(7500);
+        expect(result.courses).toHaveLength(2);
+      });
+
+      it("counts a learner enrolled in multiple of the instructor's courses once", () => {
+        const course2 = makeCourse(base.instructor.id, "Second Course");
+        const shared = makeStudent();
+
+        enrollUser(shared, base.course.id);
+        enrollUser(shared, course2.id);
+        enroll(base.course.id); // a different, single-course learner
+
+        const result = getPortfolioAnalytics(base.instructor.id);
+
+        // 3 enrollment rows, but only 2 distinct people.
+        expect(result.totalEnrollments).toBe(3);
+        expect(result.distinctLearners).toBe(2);
+      });
+
+      it("reports per-course completion and averages it across enrolled courses", () => {
+        const now = new Date().toISOString();
+        const course2 = makeCourse(base.instructor.id, "Second Course");
+
+        enroll(base.course.id, now); // 2 enrolled, 1 complete → 0.5
+        enroll(base.course.id);
+        enroll(course2.id, now); // 1 enrolled, 1 complete → 1.0
+
+        const result = getPortfolioAnalytics(base.instructor.id);
+        const byId = new Map(result.courses.map((c) => [c.courseId, c]));
+
+        expect(byId.get(base.course.id)?.completionRate).toBe(0.5);
+        expect(byId.get(course2.id)?.completionRate).toBe(1);
+        // mean(0.5, 1) = 0.75
+        expect(result.averageCompletion).toBe(0.75);
+      });
+
+      it("excludes courses with no enrollments from the average completion", () => {
+        const empty = makeCourse(base.instructor.id, "Empty Course");
+        enroll(base.course.id); // 1 enrolled, 0 complete → rate 0
+
+        const result = getPortfolioAnalytics(base.instructor.id);
+        const byId = new Map(result.courses.map((c) => [c.courseId, c]));
+
+        // The empty course is null and ignored; the average is just the enrolled
+        // course's rate, not pulled toward null.
+        expect(byId.get(empty.id)?.completionRate).toBeNull();
+        expect(result.averageCompletion).toBe(0);
+      });
+
+      it("reports null average completion when no course has any enrollment", () => {
+        makeCourse(base.instructor.id, "Another Empty Course");
+
+        const result = getPortfolioAnalytics(base.instructor.id);
+
+        expect(result.averageCompletion).toBeNull();
+      });
+
+      it("averages each course's best quiz attempts into the comparison row", () => {
+        const [lesson] = addLessons(base.course.id, 1);
+        const quizId = addQuiz(lesson, 0.7);
+
+        attempt(makeStudent(), quizId, 0.6);
+        attempt(makeStudent(), quizId, 0.8);
+
+        const result = getPortfolioAnalytics(base.instructor.id);
+        const row = result.courses.find((c) => c.courseId === base.course.id);
+
+        // mean(0.6, 0.8) = 0.7
+        expect(row?.averageQuizScore).toBeCloseTo(0.7);
+      });
+
+      it("uses each student's best attempt for the course's average quiz score", () => {
+        const [lesson] = addLessons(base.course.id, 1);
+        const quizId = addQuiz(lesson, 0.7);
+        const retaker = makeStudent();
+
+        attempt(retaker, quizId, 0.4);
+        attempt(retaker, quizId, 0.9); // best for this student
+        attempt(makeStudent(), quizId, 0.7);
+
+        const result = getPortfolioAnalytics(base.instructor.id);
+        const row = result.courses.find((c) => c.courseId === base.course.id);
+
+        // best-per-student: mean(0.9, 0.7) = 0.8
+        expect(row?.averageQuizScore).toBeCloseTo(0.8);
+      });
+
+      it("reports a null average quiz score for a course with no quiz attempts", () => {
+        const result = getPortfolioAnalytics(base.instructor.id);
+        const row = result.courses.find((c) => c.courseId === base.course.id);
+
+        expect(row?.averageQuizScore).toBeNull();
+      });
+
+      it("scopes totals and rows to the instructor's own courses", () => {
+        const other = makeInstructor();
+        const otherCourse = makeCourse(other, "Other Instructor's Course");
+
+        enroll(otherCourse.id);
+        purchase(otherCourse.id, 9999);
+        enroll(base.course.id);
+        purchase(base.course.id, 1000);
+
+        const result = getPortfolioAnalytics(base.instructor.id);
+
+        expect(result.courses).toHaveLength(1);
+        expect(result.courses[0].courseId).toBe(base.course.id);
+        expect(result.totalEnrollments).toBe(1);
+        expect(result.totalEarnings).toBe(1000);
+      });
+
+      it("orders comparison rows by course title", () => {
+        makeCourse(base.instructor.id, "Zebra");
+        makeCourse(base.instructor.id, "Apple");
+
+        const result = getPortfolioAnalytics(base.instructor.id);
+
+        // base.course is titled "Test Course".
+        expect(result.courses.map((c) => c.title)).toEqual([
+          "Apple",
+          "Test Course",
+          "Zebra",
+        ]);
+      });
+    });
+
+    describe("getPortfolioTrends", () => {
+      // Anchor "now" so week buckets and the window are deterministic.
+      const NOW = "2026-06-09T00:00:00.000Z";
+
+      beforeEach(() => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date(NOW));
+      });
+
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      function daysAgo(n: number): string {
+        return new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString();
+      }
+
+      function purchaseAt(opts: {
+        courseId: number;
+        pricePaid: number;
+        createdAt: string;
+      }) {
+        testDb
+          .insert(schema.purchases)
+          .values({
+            userId: makeStudent(),
+            courseId: opts.courseId,
+            pricePaid: opts.pricePaid,
+            country: null,
+            createdAt: opts.createdAt,
+          })
+          .run();
+      }
+
+      function enrollAt(opts: { courseId: number; enrolledAt: string }) {
+        testDb
+          .insert(schema.enrollments)
+          .values({
+            userId: makeStudent(),
+            courseId: opts.courseId,
+            enrolledAt: opts.enrolledAt,
+            completedAt: null,
+          })
+          .run();
+      }
+
+      it("returns a zero-filled 12-week series when there is no activity", () => {
+        const { weeks } = getPortfolioTrends(base.instructor.id);
+
+        expect(weeks).toHaveLength(12);
+        expect(weeks.every((w) => w.revenue === 0 && w.enrollments === 0)).toBe(
+          true
+        );
+      });
+
+      it("returns a zero-filled window for an instructor with no courses", () => {
+        const lonely = makeInstructor();
+
+        const { weeks } = getPortfolioTrends(lonely);
+
+        expect(weeks).toHaveLength(12);
+        expect(weeks.every((w) => w.revenue === 0 && w.enrollments === 0)).toBe(
+          true
+        );
+      });
+
+      it("aggregates revenue and enrollments across the instructor's courses into weekly buckets", () => {
+        const course2 = makeCourse(base.instructor.id, "Second Course");
+
+        purchaseAt({
+          courseId: base.course.id,
+          pricePaid: 5000,
+          createdAt: daysAgo(3),
+        });
+        purchaseAt({
+          courseId: course2.id,
+          pricePaid: 2500,
+          createdAt: daysAgo(2),
+        });
+        enrollAt({ courseId: base.course.id, enrolledAt: daysAgo(3) }); // newest week
+        enrollAt({ courseId: course2.id, enrolledAt: daysAgo(80) }); // oldest week
+
+        const { weeks } = getPortfolioTrends(base.instructor.id);
+
+        // Both courses' recent purchases land in the most recent bucket.
+        expect(weeks[11].revenue).toBe(7500);
+        expect(weeks[11].enrollments).toBe(1);
+        expect(weeks[0].enrollments).toBe(1);
+        expect(weeks.reduce((sum, w) => sum + w.revenue, 0)).toBe(7500);
+      });
+
+      it("excludes other instructors' courses from the portfolio trends", () => {
+        const other = makeInstructor();
+        const otherCourse = makeCourse(other, "Other Instructor's Course");
+
+        purchaseAt({
+          courseId: otherCourse.id,
+          pricePaid: 8888,
+          createdAt: daysAgo(5),
+        });
+        purchaseAt({
+          courseId: base.course.id,
+          pricePaid: 4000,
+          createdAt: daysAgo(5),
+        });
+
+        const { weeks } = getPortfolioTrends(base.instructor.id);
+
+        expect(weeks.reduce((sum, w) => sum + w.revenue, 0)).toBe(4000);
+      });
     });
   });
 });

@@ -5,6 +5,7 @@ import {
   getCourseAnalytics,
   getCourseTrends,
   getCourseFunnel,
+  getCourseQuizDistributions,
 } from "~/services/analyticsService";
 import { getUserById } from "~/services/userService";
 import { getCurrentUserId } from "~/lib/session";
@@ -24,6 +25,7 @@ import {
   TrendingUp,
   TrendingDown,
   Filter,
+  ListChecks,
 } from "lucide-react";
 
 export function meta({ data: loaderData }: Route.MetaArgs) {
@@ -71,8 +73,9 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   const analytics = getCourseAnalytics(courseId);
   const trends = getCourseTrends(courseId);
   const funnel = getCourseFunnel(courseId);
+  const quizDistributions = getCourseQuizDistributions(courseId);
 
-  return { course, analytics, trends, funnel };
+  return { course, analytics, trends, funnel, quizDistributions };
 }
 
 /** "2026-06-09" → "6/9" for compact axis labels. */
@@ -203,10 +206,121 @@ function FunnelCard({
   );
 }
 
+const formatScorePercent = (value: number) => `${Math.round(value * 100)}%`;
+
+/**
+ * Fractional x-position (0–1 across the histogram's bands) for a passing score,
+ * so the BarChart can draw the threshold marker. The bands are laid out as equal
+ * slots, so a score is mapped to its band and interpolated within that band's
+ * slot — e.g. a 70% threshold lands on the 50–70 / 70–90 boundary (0.5 across).
+ */
+function thresholdPosition(
+  passingScore: number,
+  buckets: { min: number; max: number }[]
+): number {
+  const pct = passingScore * 100;
+  for (let i = 0; i < buckets.length; i++) {
+    const { min, max } = buckets[i];
+    if (pct <= max) {
+      const within = max === min ? 0 : (pct - min) / (max - min);
+      return (i + within) / buckets.length;
+    }
+  }
+  return 1;
+}
+
+function QuizCard({
+  quiz,
+}: {
+  quiz: Route.ComponentProps["loaderData"]["quizDistributions"][number];
+}) {
+  const hasAttempts = quiz.studentCount > 0;
+
+  const barData = quiz.buckets.map((bucket) => ({
+    label: `${bucket.min}–${bucket.max}`,
+    value: bucket.count,
+    tooltip: `${bucket.min}–${bucket.max}%`,
+  }));
+  const formatStudents = (value: number) =>
+    `${value} ${value === 1 ? "student" : "students"}`;
+
+  return (
+    <div className="rounded-lg border p-4">
+      <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h3 className="truncate font-medium">{quiz.title}</h3>
+          <p className="truncate text-xs text-muted-foreground">
+            {quiz.lessonTitle}
+          </p>
+        </div>
+        <div className="flex shrink-0 gap-5 text-right">
+          <div>
+            <p className="text-xs text-muted-foreground">Pass rate</p>
+            <p className="font-semibold">
+              {quiz.passRate === null ? "—" : formatScorePercent(quiz.passRate)}
+            </p>
+          </div>
+          <div>
+            <p className="text-xs text-muted-foreground">Avg. score</p>
+            <p className="font-semibold">
+              {quiz.averageScore === null
+                ? "—"
+                : formatScorePercent(quiz.averageScore)}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {hasAttempts ? (
+        <BarChart
+          data={barData}
+          formatValue={formatStudents}
+          ariaLabel={`Best-attempt score distribution for ${quiz.title}`}
+          className="text-violet-600 dark:text-violet-500"
+          threshold={{
+            position: thresholdPosition(quiz.passingScore, quiz.buckets),
+            label: `Pass ${formatScorePercent(quiz.passingScore)}`,
+          }}
+        />
+      ) : (
+        <p className="py-6 text-center text-sm text-muted-foreground">
+          No quiz attempts yet.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function QuizDistributionsCard({
+  quizzes,
+}: {
+  quizzes: Route.ComponentProps["loaderData"]["quizDistributions"];
+}) {
+  return (
+    <Card className="mt-4">
+      <CardContent className="p-5">
+        <div className="mb-1 flex items-center gap-2">
+          <ListChecks className="size-4 text-muted-foreground" />
+          <h2 className="text-sm font-medium">Quiz score distributions</h2>
+        </div>
+        <p className="mb-4 text-xs text-muted-foreground">
+          Histogram of each student&apos;s best attempt per quiz, with the
+          passing threshold marked.
+        </p>
+        <div className="space-y-4">
+          {quizzes.map((quiz) => (
+            <QuizCard key={quiz.quizId} quiz={quiz} />
+          ))}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function InstructorCourseAnalytics({
   loaderData,
 }: Route.ComponentProps) {
-  const { course, analytics, trends, funnel } = loaderData;
+  const { course, analytics, trends, funnel, quizDistributions } = loaderData;
   const hasStudents = analytics.enrollmentCount > 0;
 
   const revenueData = trends.weeks.map((week) => ({
@@ -324,6 +438,10 @@ export default function InstructorCourseAnalytics({
       </div>
 
       {hasStudents && <FunnelCard funnel={funnel} />}
+
+      {quizDistributions.length > 0 && (
+        <QuizDistributionsCard quizzes={quizDistributions} />
+      )}
     </div>
   );
 }

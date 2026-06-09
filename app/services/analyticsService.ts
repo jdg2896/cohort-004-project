@@ -8,6 +8,8 @@ import {
   modules,
   lessonProgress,
   LessonProgressStatus,
+  quizzes,
+  quizAttempts,
 } from "~/db/schema";
 
 // ─── Analytics Service ───
@@ -361,4 +363,143 @@ export function getCourseFunnel(courseId: number): CourseFunnel {
   }
 
   return { enrollmentCount, lessons: funnelLessons };
+}
+
+// ─── Quiz score distributions ───
+// Per-quiz histogram of students' best attempts in fixed score bands, plus each
+// quiz's pass rate and average score (PRD Stories 21, 22, 23, 27). The "best
+// attempt per student per quiz" comes from one set-based grouped scan across
+// every quiz in the course (`max(score)` grouped by quiz + user) — never a
+// per-student loop — and the bucketing, pass rate, and average are a single
+// linear pass over those aggregated rows, mirroring the funnel's
+// grouped-scan-then-reduce shape. A course with no quizzes yields an empty array
+// so the caller can hide the section entirely.
+
+// Fixed score bands as percentages, low → high. The top band is inclusive of
+// 100; every other band is inclusive of its lower bound and exclusive of its
+// upper bound (see `scoreBucketIndex`).
+const QUIZ_SCORE_BUCKETS = [
+  { min: 0, max: 50 },
+  { min: 50, max: 70 },
+  { min: 70, max: 90 },
+  { min: 90, max: 100 },
+] as const;
+
+export type QuizScoreBucket = {
+  /** Inclusive lower bound of the band, as a percentage. */
+  min: number;
+  /** Upper bound as a percentage; inclusive only for the top (90–100) band. */
+  max: number;
+  /** Students whose best attempt falls in this band. */
+  count: number;
+};
+
+export type QuizDistribution = {
+  quizId: number;
+  title: string;
+  /** The lesson the quiz belongs to, shown for context in the UI. */
+  lessonTitle: string;
+  /** Passing threshold (0–1), marked on the histogram. */
+  passingScore: number;
+  /** Distinct students who have attempted this quiz (the histogram denominator). */
+  studentCount: number;
+  /**
+   * Share of attempting students whose best attempt met the passing threshold
+   * (0–1). `null` when nobody has attempted, so the caller renders a neutral
+   * placeholder instead of dividing by zero. Computed against `passingScore`
+   * (not the stored per-attempt `passed` flag) so it always agrees with the
+   * threshold drawn on the histogram.
+   */
+  passRate: number | null;
+  /** Mean of attempting students' best-attempt scores (0–1). `null` when none. */
+  averageScore: number | null;
+  /** Best-attempt counts in the fixed bands, low → high. */
+  buckets: QuizScoreBucket[];
+};
+
+/** The 0-based band index for a score (0–1): [0,.5) [.5,.7) [.7,.9) [.9,1]. */
+function scoreBucketIndex(score: number): number {
+  if (score < 0.5) return 0;
+  if (score < 0.7) return 1;
+  if (score < 0.9) return 2;
+  return 3;
+}
+
+/**
+ * Per-quiz score distributions for a course: for each quiz (in module→lesson
+ * order) a histogram of students' best attempts in fixed bands, plus pass rate
+ * and average score. Quizzes hang off lessons, which hang off modules, so the
+ * funnel's ordering join applies here too. An empty array means the course has
+ * no quizzes and the caller should hide the section.
+ */
+export function getCourseQuizDistributions(
+  courseId: number
+): QuizDistribution[] {
+  const quizRows = db
+    .select({
+      quizId: quizzes.id,
+      title: quizzes.title,
+      lessonTitle: lessons.title,
+      passingScore: quizzes.passingScore,
+    })
+    .from(quizzes)
+    .innerJoin(lessons, eq(quizzes.lessonId, lessons.id))
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .where(eq(modules.courseId, courseId))
+    .orderBy(modules.position, lessons.position)
+    .all();
+
+  if (quizRows.length === 0) return [];
+
+  // One grouped scan for the best (max) score per student per quiz across every
+  // quiz in the course. Not filtered by enrollment — in practice only enrolled
+  // students attempt, and the PRD defines the histogram over "each student's
+  // best attempt". Bucketing, pass rate, and average are a single linear pass
+  // over these rows below, so there is no per-student or per-quiz query.
+  const quizIds = quizRows.map((q) => q.quizId);
+  const bestRows = db
+    .select({
+      quizId: quizAttempts.quizId,
+      best: sql<number>`max(${quizAttempts.score})`,
+    })
+    .from(quizAttempts)
+    .where(inArray(quizAttempts.quizId, quizIds))
+    .groupBy(quizAttempts.quizId, quizAttempts.userId)
+    .all();
+
+  // Per-quiz accumulators, pre-seeded so quizzes with no attempts still appear.
+  const passingByQuiz = new Map(quizRows.map((q) => [q.quizId, q.passingScore]));
+  const stats = new Map(
+    quizRows.map((q) => [
+      q.quizId,
+      { buckets: [0, 0, 0, 0], sum: 0, passing: 0, students: 0 },
+    ])
+  );
+
+  for (const row of bestRows) {
+    const s = stats.get(row.quizId);
+    if (!s) continue; // defensive; bestRows are already filtered to course quizzes
+    s.students += 1;
+    s.sum += row.best;
+    s.buckets[scoreBucketIndex(row.best)] += 1;
+    if (row.best >= (passingByQuiz.get(row.quizId) ?? 1)) s.passing += 1;
+  }
+
+  return quizRows.map((q) => {
+    const s = stats.get(q.quizId)!;
+    return {
+      quizId: q.quizId,
+      title: q.title,
+      lessonTitle: q.lessonTitle,
+      passingScore: q.passingScore,
+      studentCount: s.students,
+      passRate: s.students === 0 ? null : s.passing / s.students,
+      averageScore: s.students === 0 ? null : s.sum / s.students,
+      buckets: QUIZ_SCORE_BUCKETS.map((band, i) => ({
+        min: band.min,
+        max: band.max,
+        count: s.buckets[i],
+      })),
+    };
+  });
 }

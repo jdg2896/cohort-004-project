@@ -16,6 +16,7 @@ import {
   getCourseAnalytics,
   getCourseTrends,
   getCourseFunnel,
+  getCourseQuizDistributions,
 } from "./analyticsService";
 
 describe("analyticsService", () => {
@@ -568,6 +569,219 @@ describe("analyticsService", () => {
       expect(funnel.lessons.map((l) => l.completionRate)).toEqual([0, 0]);
       expect(funnel.lessons.map((l) => l.completedCount)).toEqual([0, 0]);
       expect(funnel.lessons.every((l) => !l.isBiggestDropOff)).toBe(true);
+    });
+  });
+
+  // ─── Quiz score distributions ───
+
+  describe("getCourseQuizDistributions", () => {
+    // A module at `modulePosition` with `count` lessons (positions 1..count),
+    // titled with `prefix` so order is easy to assert. Returns the lesson ids.
+    function addModuleWithLessons(
+      courseId: number,
+      modulePosition: number,
+      count: number,
+      prefix: string
+    ): number[] {
+      const mod = testDb
+        .insert(schema.modules)
+        .values({
+          courseId,
+          title: `Module ${modulePosition}`,
+          position: modulePosition,
+        })
+        .returning()
+        .get();
+
+      const ids: number[] = [];
+      for (let i = 0; i < count; i++) {
+        const lesson = testDb
+          .insert(schema.lessons)
+          .values({
+            moduleId: mod.id,
+            title: `${prefix}${i + 1}`,
+            position: i + 1,
+          })
+          .returning()
+          .get();
+        ids.push(lesson.id);
+      }
+      return ids;
+    }
+
+    function addQuiz(
+      lessonId: number,
+      passingScore: number,
+      title = "Quiz"
+    ): number {
+      return testDb
+        .insert(schema.quizzes)
+        .values({ lessonId, title, passingScore })
+        .returning()
+        .get().id;
+    }
+
+    // Records one attempt; `passed` mirrors the seed's score >= 0.7 rule, but the
+    // service derives pass rate from the quiz threshold, not this flag.
+    function attempt(userId: number, quizId: number, score: number) {
+      testDb
+        .insert(schema.quizAttempts)
+        .values({ userId, quizId, score, passed: score >= 0.7 })
+        .run();
+    }
+
+    it("returns an empty array for a course with no quizzes (suppression)", () => {
+      addLessons(base.course.id, 2); // lessons but no quizzes
+      expect(getCourseQuizDistributions(base.course.id)).toEqual([]);
+    });
+
+    it("returns an empty array for a course with no lessons", () => {
+      expect(getCourseQuizDistributions(base.course.id)).toEqual([]);
+    });
+
+    it("lists quizzes in module→lesson order regardless of insertion order", () => {
+      // Insert the later module first to prove ordering is by position, not id.
+      const [b1] = addModuleWithLessons(base.course.id, 2, 1, "B");
+      const [a1, a2] = addModuleWithLessons(base.course.id, 1, 2, "A");
+
+      addQuiz(b1, 0.7, "Quiz B1");
+      addQuiz(a2, 0.7, "Quiz A2");
+      addQuiz(a1, 0.7, "Quiz A1");
+
+      const result = getCourseQuizDistributions(base.course.id);
+
+      expect(result.map((q) => q.title)).toEqual([
+        "Quiz A1",
+        "Quiz A2",
+        "Quiz B1",
+      ]);
+    });
+
+    it("buckets each student's best attempt into the fixed bands", () => {
+      const [lesson] = addLessons(base.course.id, 1);
+      const quizId = addQuiz(lesson, 0.7);
+
+      // One student per boundary-ish score: 40 → 0–50, 50 → 50–70, 70 → 70–90,
+      // 90 and 100 → 90–100.
+      [0.4, 0.5, 0.7, 0.9, 1.0].forEach((score) => {
+        attempt(makeStudent(), quizId, score);
+      });
+
+      const [quiz] = getCourseQuizDistributions(base.course.id);
+
+      expect(quiz.buckets.map((b) => [b.min, b.max])).toEqual([
+        [0, 50],
+        [50, 70],
+        [70, 90],
+        [90, 100],
+      ]);
+      expect(quiz.buckets.map((b) => b.count)).toEqual([1, 1, 1, 2]);
+      expect(quiz.studentCount).toBe(5);
+    });
+
+    it("uses each student's best (max) attempt, counting the student once", () => {
+      const [lesson] = addLessons(base.course.id, 1);
+      const quizId = addQuiz(lesson, 0.7);
+      const student = makeStudent();
+
+      attempt(student, quizId, 0.4); // first try, would land in 0–50
+      attempt(student, quizId, 0.95); // retake, the best → 90–100
+
+      const [quiz] = getCourseQuizDistributions(base.course.id);
+
+      expect(quiz.studentCount).toBe(1);
+      expect(quiz.buckets.map((b) => b.count)).toEqual([0, 0, 0, 1]);
+    });
+
+    it("derives pass rate from the quiz threshold and averages best attempts", () => {
+      const [lesson] = addLessons(base.course.id, 1);
+      const quizId = addQuiz(lesson, 0.7);
+
+      attempt(makeStudent(), quizId, 0.6); // below threshold
+      attempt(makeStudent(), quizId, 0.7); // exactly at threshold → pass
+      attempt(makeStudent(), quizId, 0.95); // above threshold
+
+      const [quiz] = getCourseQuizDistributions(base.course.id);
+
+      // 2 of 3 best attempts meet the 0.7 threshold.
+      expect(quiz.passRate).toBeCloseTo(2 / 3);
+      // mean(0.6, 0.7, 0.95) = 0.75
+      expect(quiz.averageScore).toBeCloseTo(0.75);
+    });
+
+    it("counts a student as passing only on their best attempt", () => {
+      const [lesson] = addLessons(base.course.id, 1);
+      const quizId = addQuiz(lesson, 0.7);
+      const student = makeStudent();
+
+      attempt(student, quizId, 0.5); // fail
+      attempt(student, quizId, 0.8); // best → pass
+
+      const [quiz] = getCourseQuizDistributions(base.course.id);
+
+      expect(quiz.passRate).toBe(1);
+    });
+
+    it("reports a quiz with no attempts as a neutral empty distribution", () => {
+      const [lesson] = addLessons(base.course.id, 1);
+      addQuiz(lesson, 0.7);
+
+      const [quiz] = getCourseQuizDistributions(base.course.id);
+
+      expect(quiz.studentCount).toBe(0);
+      expect(quiz.passRate).toBeNull();
+      expect(quiz.averageScore).toBeNull();
+      expect(quiz.buckets.map((b) => b.count)).toEqual([0, 0, 0, 0]);
+    });
+
+    it("scopes quizzes and attempts to the course", () => {
+      const [lesson] = addLessons(base.course.id, 1);
+      const quizId = addQuiz(lesson, 0.7);
+      attempt(makeStudent(), quizId, 0.8);
+
+      // Another instructor's course with its own quiz and attempts.
+      const otherCourse = testDb
+        .insert(schema.courses)
+        .values({
+          title: "Other Course",
+          slug: "other-course",
+          description: "Another course",
+          instructorId: base.instructor.id,
+          categoryId: base.category.id,
+          status: schema.CourseStatus.Published,
+        })
+        .returning()
+        .get();
+      const otherMod = testDb
+        .insert(schema.modules)
+        .values({ courseId: otherCourse.id, title: "M", position: 1 })
+        .returning()
+        .get();
+      const otherLesson = testDb
+        .insert(schema.lessons)
+        .values({ moduleId: otherMod.id, title: "L", position: 1 })
+        .returning()
+        .get();
+      const otherQuiz = addQuiz(otherLesson.id, 0.7, "Other Quiz");
+      attempt(makeStudent(), otherQuiz, 0.4);
+
+      const result = getCourseQuizDistributions(base.course.id);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].quizId).toBe(quizId);
+      expect(result[0].studentCount).toBe(1);
+    });
+
+    it("reflects the quiz's own passing threshold in pass rate", () => {
+      const [lesson] = addLessons(base.course.id, 1);
+      const quizId = addQuiz(lesson, 0.6); // lower threshold than the seed's 0.7
+
+      attempt(makeStudent(), quizId, 0.65); // passes at 0.6, would fail at 0.7
+
+      const [quiz] = getCourseQuizDistributions(base.course.id);
+
+      expect(quiz.passingScore).toBe(0.6);
+      expect(quiz.passRate).toBe(1);
     });
   });
 });

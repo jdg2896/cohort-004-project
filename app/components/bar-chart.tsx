@@ -30,12 +30,23 @@ const BAR_GAP_RATIO = 0.3;
  * overrides that with an amber accent. Reused by the lesson-completion funnel
  * and the per-quiz score histograms.
  */
+export type BarChartThreshold = {
+  /**
+   * Where to draw the vertical marker, as a fraction (0–1) of the plotted width.
+   * The quiz histogram passes the passing-score's position across the bands.
+   */
+  position: number;
+  /** Short label rendered above the line, e.g. "Pass 70%". */
+  label?: string;
+};
+
 export function BarChart({
   data,
   maxValue,
   formatValue = (value) => String(value),
   ariaLabel,
   className,
+  threshold,
 }: {
   data: BarChartDatum[];
   /** Fixed top of the value scale; defaults to the largest value in `data`. */
@@ -43,6 +54,8 @@ export function BarChart({
   formatValue?: (value: number) => string;
   ariaLabel: string;
   className?: string;
+  /** Optional vertical reference line, e.g. a quiz's passing threshold. */
+  threshold?: BarChartThreshold;
 }) {
   const [hovered, setHovered] = useState<number | null>(null);
 
@@ -71,6 +84,8 @@ export function BarChart({
   });
 
   const active = hovered === null ? null : bars[hovered];
+  const thresholdX =
+    threshold === undefined ? null : PAD_X + plotW * threshold.position;
 
   return (
     <div className={cn("relative text-primary", className)}>
@@ -109,6 +124,21 @@ export function BarChart({
             onMouseLeave={() => setHovered(null)}
           />
         ))}
+
+        {/* Passing-threshold marker, drawn on top of the bars. */}
+        {thresholdX !== null && (
+          <line
+            x1={thresholdX}
+            y1={PAD_TOP - 4}
+            x2={thresholdX}
+            y2={baselineY}
+            stroke="currentColor"
+            strokeWidth={1.5}
+            strokeDasharray="4 3"
+            vectorEffect="non-scaling-stroke"
+            className="text-rose-500 dark:text-rose-400"
+          />
+        )}
       </svg>
 
       {/* Per-bar axis labels, one equal cell under each slot. */}
@@ -119,6 +149,16 @@ export function BarChart({
           </span>
         ))}
       </div>
+
+      {/* Static threshold label, pinned to the marker line. */}
+      {threshold?.label && thresholdX !== null && (
+        <div
+          className="pointer-events-none absolute top-0 -translate-x-1/2 -translate-y-1/2 rounded bg-rose-500/10 px-1.5 py-0.5 text-[10px] font-medium text-rose-600 dark:text-rose-400"
+          style={{ left: `${(thresholdX / VIEW_W) * 100}%` }}
+        >
+          {threshold.label}
+        </div>
+      )}
 
       {/* Lightweight hover tooltip (progressive enhancement). */}
       {active && (

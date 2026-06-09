@@ -1,13 +1,14 @@
 import { Link, data, isRouteErrorResponse } from "react-router";
 import type { Route } from "./+types/instructor.$courseId.analytics";
 import { getCourseById } from "~/services/courseService";
-import { getCourseAnalytics } from "~/services/analyticsService";
+import { getCourseAnalytics, getCourseTrends } from "~/services/analyticsService";
 import { getUserById } from "~/services/userService";
 import { getCurrentUserId } from "~/lib/session";
 import { UserRole } from "~/db/schema";
 import { formatMoney } from "~/lib/utils";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
+import { TrendChart } from "~/components/trend-chart";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -15,6 +16,7 @@ import {
   DollarSign,
   GraduationCap,
   Activity,
+  TrendingUp,
 } from "lucide-react";
 
 export function meta({ data: loaderData }: Route.MetaArgs) {
@@ -60,8 +62,15 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   }
 
   const analytics = getCourseAnalytics(courseId);
+  const trends = getCourseTrends(courseId);
 
-  return { course, analytics };
+  return { course, analytics, trends };
+}
+
+/** "2026-06-09" → "6/9" for compact axis labels. */
+function weekLabel(weekStart: string): string {
+  const [, month, day] = weekStart.split("-");
+  return `${parseInt(month, 10)}/${parseInt(day, 10)}`;
 }
 
 function StatTile({
@@ -89,11 +98,63 @@ function StatTile({
   );
 }
 
+function TrendCard({
+  title,
+  total,
+  data,
+  formatValue,
+  ariaLabel,
+  colorClass,
+}: {
+  title: string;
+  total: string;
+  data: { label: string; value: number }[];
+  formatValue?: (value: number) => string;
+  ariaLabel: string;
+  colorClass: string;
+}) {
+  return (
+    <Card>
+      <CardContent className="p-5">
+        <div className="mb-3 flex items-baseline justify-between gap-2">
+          <h2 className="flex items-center gap-2 text-sm font-medium">
+            <TrendingUp className="size-4 text-muted-foreground" />
+            {title}
+          </h2>
+          <span className="text-sm text-muted-foreground">
+            {total} · last 12 weeks
+          </span>
+        </div>
+        <TrendChart
+          data={data}
+          formatValue={formatValue}
+          ariaLabel={ariaLabel}
+          className={colorClass}
+        />
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function InstructorCourseAnalytics({
   loaderData,
 }: Route.ComponentProps) {
-  const { course, analytics } = loaderData;
+  const { course, analytics, trends } = loaderData;
   const hasStudents = analytics.enrollmentCount > 0;
+
+  const revenueData = trends.weeks.map((week) => ({
+    label: weekLabel(week.weekStart),
+    value: week.revenue,
+  }));
+  const enrollmentData = trends.weeks.map((week) => ({
+    label: weekLabel(week.weekStart),
+    value: week.enrollments,
+  }));
+  const windowRevenue = trends.weeks.reduce((sum, w) => sum + w.revenue, 0);
+  const windowEnrollments = trends.weeks.reduce(
+    (sum, w) => sum + w.enrollments,
+    0
+  );
 
   // Neutral placeholder for metrics that are undefined with no enrolled students.
   const completionDisplay =
@@ -174,6 +235,24 @@ export default function InstructorCourseAnalytics({
           value={progressDisplay}
           hint="Mean lessons completed across students"
           icon={Activity}
+        />
+      </div>
+
+      <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <TrendCard
+          title="Weekly revenue"
+          total={formatMoney(windowRevenue)}
+          data={revenueData}
+          formatValue={formatMoney}
+          ariaLabel="Weekly revenue over the last 12 weeks"
+          colorClass="text-emerald-600 dark:text-emerald-500"
+        />
+        <TrendCard
+          title="Weekly enrollments"
+          total={String(windowEnrollments)}
+          data={enrollmentData}
+          ariaLabel="Weekly new enrollments over the last 12 weeks"
+          colorClass="text-blue-600 dark:text-blue-500"
         />
       </div>
     </div>

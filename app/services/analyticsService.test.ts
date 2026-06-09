@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import * as schema from "~/db/schema";
 
@@ -12,7 +12,7 @@ vi.mock("~/db", () => ({
 }));
 
 // Import after the mock so the module picks up our test db.
-import { getCourseAnalytics } from "./analyticsService";
+import { getCourseAnalytics, getCourseTrends } from "./analyticsService";
 
 describe("analyticsService", () => {
   beforeEach(() => {
@@ -204,5 +204,191 @@ describe("analyticsService", () => {
     const result = getCourseAnalytics(base.course.id);
     expect(result.averageProgress).toBe(0);
     expect(result.completionRate).toBe(0);
+  });
+
+  // ─── Weekly trends ───
+
+  describe("getCourseTrends", () => {
+    // Anchor "now" so week buckets and the window are deterministic.
+    const NOW = "2026-06-09T00:00:00.000Z";
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(NOW));
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    // ISO timestamp `n` whole days before the (faked) current time.
+    function daysAgo(n: number): string {
+      return new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString();
+    }
+
+    function purchaseAt(opts: {
+      courseId: number;
+      pricePaid: number;
+      createdAt: string;
+    }) {
+      testDb
+        .insert(schema.purchases)
+        .values({
+          userId: makeStudent(),
+          courseId: opts.courseId,
+          pricePaid: opts.pricePaid,
+          country: null,
+          createdAt: opts.createdAt,
+        })
+        .run();
+    }
+
+    function enrollAt(opts: { courseId: number; enrolledAt: string }) {
+      testDb
+        .insert(schema.enrollments)
+        .values({
+          userId: makeStudent(),
+          courseId: opts.courseId,
+          enrolledAt: opts.enrolledAt,
+          completedAt: null,
+        })
+        .run();
+    }
+
+    it("returns a zero-filled 12-week series when there is no activity", () => {
+      const { weeks } = getCourseTrends(base.course.id);
+
+      expect(weeks).toHaveLength(12);
+      expect(weeks.every((w) => w.revenue === 0 && w.enrollments === 0)).toBe(
+        true
+      );
+
+      // Week starts are 12 distinct dates in ascending (oldest → newest) order.
+      const starts = weeks.map((w) => w.weekStart);
+      expect(new Set(starts).size).toBe(12);
+      expect(starts).toEqual([...starts].sort());
+    });
+
+    it("buckets revenue into the matching week and zero-fills the rest", () => {
+      // daysAgo(3) lands in the most recent 7-day bucket (the last point).
+      purchaseAt({
+        courseId: base.course.id,
+        pricePaid: 5000,
+        createdAt: daysAgo(3),
+      });
+
+      const { weeks } = getCourseTrends(base.course.id);
+
+      expect(weeks[11].revenue).toBe(5000);
+      expect(weeks.slice(0, 11).every((w) => w.revenue === 0)).toBe(true);
+    });
+
+    it("places older activity in an earlier bucket than recent activity", () => {
+      purchaseAt({
+        courseId: base.course.id,
+        pricePaid: 5000,
+        createdAt: daysAgo(3), // newest week
+      });
+      purchaseAt({
+        courseId: base.course.id,
+        pricePaid: 2500,
+        createdAt: daysAgo(80), // oldest week
+      });
+
+      const { weeks } = getCourseTrends(base.course.id);
+
+      expect(weeks[11].revenue).toBe(5000);
+      expect(weeks[0].revenue).toBe(2500);
+      expect(weeks.reduce((sum, w) => sum + w.revenue, 0)).toBe(7500);
+    });
+
+    it("sums multiple purchases that fall in the same week", () => {
+      purchaseAt({
+        courseId: base.course.id,
+        pricePaid: 5000,
+        createdAt: daysAgo(2),
+      });
+      purchaseAt({
+        courseId: base.course.id,
+        pricePaid: 1500,
+        createdAt: daysAgo(4),
+      });
+
+      const { weeks } = getCourseTrends(base.course.id);
+
+      expect(weeks[11].revenue).toBe(6500);
+    });
+
+    it("counts new enrollments per week", () => {
+      enrollAt({ courseId: base.course.id, enrolledAt: daysAgo(3) });
+      enrollAt({ courseId: base.course.id, enrolledAt: daysAgo(3) });
+      enrollAt({ courseId: base.course.id, enrolledAt: daysAgo(80) });
+
+      const { weeks } = getCourseTrends(base.course.id);
+
+      expect(weeks[11].enrollments).toBe(2);
+      expect(weeks[0].enrollments).toBe(1);
+      expect(weeks.reduce((sum, w) => sum + w.enrollments, 0)).toBe(3);
+    });
+
+    it("excludes activity older than the 12-week window", () => {
+      purchaseAt({
+        courseId: base.course.id,
+        pricePaid: 9999,
+        createdAt: daysAgo(90), // before the window
+      });
+      purchaseAt({
+        courseId: base.course.id,
+        pricePaid: 4000,
+        createdAt: daysAgo(10), // inside the window
+      });
+
+      const { weeks } = getCourseTrends(base.course.id);
+
+      expect(weeks.reduce((sum, w) => sum + w.revenue, 0)).toBe(4000);
+      expect(weeks[10].revenue).toBe(4000);
+    });
+
+    it("counts activity at exactly 'now' in the most recent bucket", () => {
+      purchaseAt({
+        courseId: base.course.id,
+        pricePaid: 1234,
+        createdAt: daysAgo(0),
+      });
+
+      const { weeks } = getCourseTrends(base.course.id);
+
+      expect(weeks[11].revenue).toBe(1234);
+    });
+
+    it("scopes trends to the given course", () => {
+      const otherCourse = testDb
+        .insert(schema.courses)
+        .values({
+          title: "Other Course",
+          slug: "other-course",
+          description: "Another course",
+          instructorId: base.instructor.id,
+          categoryId: base.category.id,
+          status: schema.CourseStatus.Published,
+        })
+        .returning()
+        .get();
+
+      purchaseAt({
+        courseId: otherCourse.id,
+        pricePaid: 8888,
+        createdAt: daysAgo(5),
+      });
+      purchaseAt({
+        courseId: base.course.id,
+        pricePaid: 4000,
+        createdAt: daysAgo(5),
+      });
+
+      const { weeks } = getCourseTrends(base.course.id);
+
+      expect(weeks.reduce((sum, w) => sum + w.revenue, 0)).toBe(4000);
+    });
   });
 });

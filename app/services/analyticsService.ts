@@ -1,4 +1,5 @@
-import { eq, and, inArray, sql } from "drizzle-orm";
+import { eq, and, gte, inArray, sql } from "drizzle-orm";
+import type { AnySQLiteColumn } from "drizzle-orm/sqlite-core";
 import { db } from "~/db";
 import {
   enrollments,
@@ -132,4 +133,125 @@ function getAverageProgress(courseId: number, enrollmentCount: number): number {
   );
 
   return Math.round(sumOfPercentages / enrollmentCount);
+}
+
+// ─── Weekly trends ───
+// Revenue and enrollment bucketed into weekly points over a fixed ~12-week
+// window. The window is computed here (in the service) so the series can be
+// zero-filled deterministically — empty weeks render as 0 rather than being
+// skipped (PRD Story 38). Bucketing itself is a single set-based date-grouped
+// query per series (no per-week or per-row loop).
+
+const TREND_WEEKS = 12;
+const DAYS_PER_WEEK = 7;
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+export type WeeklyTrendPoint = {
+  /** ISO date (YYYY-MM-DD) marking the start of this week's bucket. */
+  weekStart: string;
+  /** Gross earnings recorded in this week, in cents. */
+  revenue: number;
+  /** New enrollments recorded in this week. */
+  enrollments: number;
+};
+
+export type CourseTrends = {
+  /**
+   * Weekly points oldest → newest, always `TREND_WEEKS` long and zero-filled
+   * across the full window. The last point is the most recent 7 days.
+   */
+  weeks: WeeklyTrendPoint[];
+};
+
+/**
+ * The trend window: the ISO timestamp at which the oldest bucket starts (used
+ * both to filter rows and as the reference point for in-SQL bucketing) and the
+ * per-week start-date labels, oldest → newest.
+ */
+function computeWeekWindow(now: Date): {
+  windowStartIso: string;
+  weekStarts: string[];
+} {
+  const windowStartMs = now.getTime() - TREND_WEEKS * DAYS_PER_WEEK * MS_PER_DAY;
+  const weekStarts: string[] = [];
+  for (let i = 0; i < TREND_WEEKS; i++) {
+    const start = new Date(windowStartMs + i * DAYS_PER_WEEK * MS_PER_DAY);
+    weekStarts.push(start.toISOString().slice(0, 10));
+  }
+  return { windowStartIso: new Date(windowStartMs).toISOString(), weekStarts };
+}
+
+/**
+ * A 0-based week-bucket index for a timestamp column, measured from
+ * `windowStartIso`. The day difference is rounded to a whole day before the
+ * weekly division so float jitter at exact week boundaries can't push a row
+ * into the wrong bucket. Rows older than the window are excluded by the
+ * caller's `gte` filter; a row at "now" lands at index `TREND_WEEKS`, which the
+ * caller clamps into the most recent bucket.
+ */
+function weekIndexExpr(column: AnySQLiteColumn, windowStartIso: string) {
+  // The outer cast truncates the division to a whole week index, so the bucket
+  // is always an integer regardless of SQLite's int-vs-real division rules.
+  return sql<number>`cast(round(julianday(${column}) - julianday(${windowStartIso})) / ${DAYS_PER_WEEK} as integer)`;
+}
+
+/**
+ * Weekly revenue and enrollment trends for a course over the last ~12 weeks,
+ * zero-filled. Two set-based date-grouped queries (one per table) feed a
+ * pre-built zero-filled window, so weeks with no activity are 0 rather than
+ * absent.
+ */
+export function getCourseTrends(courseId: number): CourseTrends {
+  const { windowStartIso, weekStarts } = computeWeekWindow(new Date());
+
+  const revenueWeek = weekIndexExpr(purchases.createdAt, windowStartIso);
+  const revenueRows = db
+    .select({
+      week: revenueWeek,
+      total: sql<number>`coalesce(sum(${purchases.pricePaid}), 0)`,
+    })
+    .from(purchases)
+    .where(
+      and(
+        eq(purchases.courseId, courseId),
+        gte(purchases.createdAt, windowStartIso)
+      )
+    )
+    .groupBy(revenueWeek)
+    .all();
+
+  const enrollmentWeek = weekIndexExpr(enrollments.enrolledAt, windowStartIso);
+  const enrollmentRows = db
+    .select({
+      week: enrollmentWeek,
+      total: sql<number>`count(*)`,
+    })
+    .from(enrollments)
+    .where(
+      and(
+        eq(enrollments.courseId, courseId),
+        gte(enrollments.enrolledAt, windowStartIso)
+      )
+    )
+    .groupBy(enrollmentWeek)
+    .all();
+
+  const weeks: WeeklyTrendPoint[] = weekStarts.map((weekStart) => ({
+    weekStart,
+    revenue: 0,
+    enrollments: 0,
+  }));
+
+  // Clamp the open upper edge: a row at exactly "now" computes to index
+  // TREND_WEEKS, which belongs in the most recent bucket.
+  const bucketOf = (week: number) => Math.min(week, TREND_WEEKS - 1);
+
+  for (const row of revenueRows) {
+    weeks[bucketOf(row.week)].revenue += row.total;
+  }
+  for (const row of enrollmentRows) {
+    weeks[bucketOf(row.week)].enrollments += row.total;
+  }
+
+  return { weeks };
 }

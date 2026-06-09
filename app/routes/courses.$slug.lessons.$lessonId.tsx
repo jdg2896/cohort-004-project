@@ -10,7 +10,10 @@ import { getLessonById } from "~/services/lessonService";
 import { getModuleById } from "~/services/moduleService";
 import { getCurrentUserId } from "~/lib/session";
 import { getUserById } from "~/services/userService";
-import { isUserEnrolled } from "~/services/enrollmentService";
+import {
+  isUserEnrolled,
+  markEnrollmentCompleteIfFinished,
+} from "~/services/enrollmentService";
 import {
   countTopLevelComments,
   getCommentThreads,
@@ -533,6 +536,9 @@ export async function action({ params, request }: Route.ActionArgs) {
       );
     }
     markLessonComplete(currentUserId, lessonId);
+    // Finishing the final lesson promotes the enrollment to "complete" (set-once).
+    // No-op for the instructor/admin viewers above who have no enrollment.
+    markEnrollmentCompleteIfFinished({ userId: currentUserId, courseId: course.id });
     return { success: true };
   }
 

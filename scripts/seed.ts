@@ -1393,6 +1393,9 @@ You've completed the Building REST APIs course. You now have the skills to build
       { userId: students[0].id, courseId: course1.id, enrolledAt: daysAgo(50) },
       { userId: students[0].id, courseId: course2.id, enrolledAt: daysAgo(40) },
       {
+        // Seed hygiene: a seeded `completedAt` must be backed by 100% lesson
+        // progress, so the completion tile and the funnel/average-progress agree.
+        // James's full course-1 progress is seeded below (Lesson Progress section).
         userId: students[1].id,
         courseId: course1.id,
         enrolledAt: daysAgo(45),

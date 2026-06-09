@@ -8,6 +8,10 @@ import {
   lessonProgress,
   LessonProgressStatus,
 } from "~/db/schema";
+import {
+  getTotalLessonCount,
+  getCompletedLessonCount,
+} from "~/services/progressService";
 
 // ─── Enrollment Service ───
 // Handles enrollment, unenrollment, duplicate prevention, and enrollment validation.
@@ -119,6 +123,39 @@ export function markEnrollmentComplete(userId: number, courseId: number) {
     )
     .returning()
     .get();
+}
+
+/**
+ * Marks the user's enrollment complete the first time they finish every lesson
+ * in the course. A one-way, set-once milestone: it never moves or clears an
+ * existing completion timestamp, and it is a no-op for a course with zero
+ * lessons or a user without an enrollment.
+ *
+ * Returns the enrollment — freshly stamped when it just completed, otherwise
+ * unchanged — or undefined when there is no enrollment to act on. Depends on the
+ * progress service for lesson counts (one-way); the lesson-completion primitive
+ * gains no side effects from this.
+ */
+export function markEnrollmentCompleteIfFinished(opts: {
+  userId: number;
+  courseId: number;
+}) {
+  const { userId, courseId } = opts;
+
+  const enrollment = findEnrollment(userId, courseId);
+  if (!enrollment) return undefined;
+
+  // Set-once: an existing completion is a historical milestone, never re-stamped.
+  if (enrollment.completedAt) return enrollment;
+
+  const totalLessons = getTotalLessonCount(courseId);
+  if (totalLessons === 0) return enrollment;
+
+  if (getCompletedLessonCount(userId, courseId) < totalLessons) {
+    return enrollment;
+  }
+
+  return markEnrollmentComplete(userId, courseId);
 }
 
 export function getUserEnrolledCourses(userId: number) {

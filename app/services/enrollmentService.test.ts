@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { and, eq } from "drizzle-orm";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import * as schema from "~/db/schema";
 
@@ -24,6 +25,7 @@ import {
   getUserEnrolledCourses,
   getCourseEnrolledStudents,
   markEnrollmentComplete,
+  markEnrollmentCompleteIfFinished,
 } from "./enrollmentService";
 
 describe("enrollmentService", () => {
@@ -248,6 +250,131 @@ describe("enrollmentService", () => {
 
     it("returns empty array when course has no enrollments", () => {
       expect(getCourseEnrolledStudents(base.course.id)).toHaveLength(0);
+    });
+  });
+
+  describe("markEnrollmentCompleteIfFinished", () => {
+    // Adds a single module of `count` lessons to base.course; returns lesson ids.
+    function addLessons(count: number): number[] {
+      const mod = testDb
+        .insert(schema.modules)
+        .values({ courseId: base.course.id, title: "Module 1", position: 1 })
+        .returning()
+        .get();
+
+      const ids: number[] = [];
+      for (let i = 0; i < count; i++) {
+        const lesson = testDb
+          .insert(schema.lessons)
+          .values({
+            moduleId: mod.id,
+            title: `Lesson ${i + 1}`,
+            position: i + 1,
+          })
+          .returning()
+          .get();
+        ids.push(lesson.id);
+      }
+      return ids;
+    }
+
+    function completeLessons(userId: number, lessonIds: number[]) {
+      for (const lessonId of lessonIds) {
+        testDb
+          .insert(schema.lessonProgress)
+          .values({
+            userId,
+            lessonId,
+            status: schema.LessonProgressStatus.Completed,
+            completedAt: new Date().toISOString(),
+          })
+          .run();
+      }
+    }
+
+    function readCompletedAt(userId: number, courseId: number) {
+      return findEnrollment(userId, courseId)?.completedAt ?? null;
+    }
+
+    it("sets completedAt once every lesson is complete", () => {
+      enrollUser(base.user.id, base.course.id, false, false);
+      const lessonIds = addLessons(3);
+      completeLessons(base.user.id, lessonIds);
+
+      const result = markEnrollmentCompleteIfFinished({
+        userId: base.user.id,
+        courseId: base.course.id,
+      });
+
+      expect(result!.completedAt).toBeTruthy();
+      expect(readCompletedAt(base.user.id, base.course.id)).toBeTruthy();
+    });
+
+    it("leaves completedAt null when only some lessons are complete", () => {
+      enrollUser(base.user.id, base.course.id, false, false);
+      const lessonIds = addLessons(3);
+      completeLessons(base.user.id, lessonIds.slice(0, 2)); // 2 of 3
+
+      const result = markEnrollmentCompleteIfFinished({
+        userId: base.user.id,
+        courseId: base.course.id,
+      });
+
+      expect(result!.completedAt).toBeNull();
+      expect(readCompletedAt(base.user.id, base.course.id)).toBeNull();
+    });
+
+    it("does not move an existing completedAt (set-once)", () => {
+      enrollUser(base.user.id, base.course.id, false, false);
+      const lessonIds = addLessons(2);
+      completeLessons(base.user.id, lessonIds);
+
+      // Pre-existing historical milestone — must never be re-stamped.
+      const original = "2020-01-01T00:00:00.000Z";
+      testDb
+        .update(schema.enrollments)
+        .set({ completedAt: original })
+        .where(
+          and(
+            eq(schema.enrollments.userId, base.user.id),
+            eq(schema.enrollments.courseId, base.course.id)
+          )
+        )
+        .run();
+
+      const result = markEnrollmentCompleteIfFinished({
+        userId: base.user.id,
+        courseId: base.course.id,
+      });
+
+      expect(result!.completedAt).toBe(original);
+      expect(readCompletedAt(base.user.id, base.course.id)).toBe(original);
+    });
+
+    it("is a no-op for a course with zero lessons", () => {
+      enrollUser(base.user.id, base.course.id, false, false);
+
+      const result = markEnrollmentCompleteIfFinished({
+        userId: base.user.id,
+        courseId: base.course.id,
+      });
+
+      expect(result).toBeDefined();
+      expect(result!.completedAt).toBeNull();
+      expect(readCompletedAt(base.user.id, base.course.id)).toBeNull();
+    });
+
+    it("is a no-op when the user has no enrollment", () => {
+      const lessonIds = addLessons(2);
+      completeLessons(base.user.id, lessonIds);
+
+      const result = markEnrollmentCompleteIfFinished({
+        userId: base.user.id,
+        courseId: base.course.id,
+      });
+
+      expect(result).toBeUndefined();
+      expect(findEnrollment(base.user.id, base.course.id)).toBeUndefined();
     });
   });
 });

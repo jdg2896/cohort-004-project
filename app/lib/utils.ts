@@ -14,6 +14,15 @@ export function formatPrice(cents: number | null | undefined): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
 
+/**
+ * Format a money amount in cents as currency, always "$X.XX" — including
+ * "$0.00". Unlike formatPrice, this never renders "Free": a zero earnings
+ * figure on the analytics dashboard should read as $0.00, not as a price tag.
+ */
+export function formatMoney(cents: number | null | undefined): string {
+  return `$${((cents ?? 0) / 100).toFixed(2)}`;
+}
+
 export function formatDuration(
   minutes: number,
   showHours: boolean,

@@ -1,7 +1,11 @@
 import { Link, data, isRouteErrorResponse } from "react-router";
 import type { Route } from "./+types/instructor.$courseId.analytics";
 import { getCourseById } from "~/services/courseService";
-import { getCourseAnalytics, getCourseTrends } from "~/services/analyticsService";
+import {
+  getCourseAnalytics,
+  getCourseTrends,
+  getCourseFunnel,
+} from "~/services/analyticsService";
 import { getUserById } from "~/services/userService";
 import { getCurrentUserId } from "~/lib/session";
 import { UserRole } from "~/db/schema";
@@ -9,6 +13,7 @@ import { formatMoney } from "~/lib/utils";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { TrendChart } from "~/components/trend-chart";
+import { BarChart } from "~/components/bar-chart";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -17,6 +22,8 @@ import {
   GraduationCap,
   Activity,
   TrendingUp,
+  TrendingDown,
+  Filter,
 } from "lucide-react";
 
 export function meta({ data: loaderData }: Route.MetaArgs) {
@@ -63,8 +70,9 @@ export async function loader({ params, request }: Route.LoaderArgs) {
 
   const analytics = getCourseAnalytics(courseId);
   const trends = getCourseTrends(courseId);
+  const funnel = getCourseFunnel(courseId);
 
-  return { course, analytics, trends };
+  return { course, analytics, trends, funnel };
 }
 
 /** "2026-06-09" → "6/9" for compact axis labels. */
@@ -136,10 +144,69 @@ function TrendCard({
   );
 }
 
+function FunnelCard({
+  funnel,
+}: {
+  funnel: Route.ComponentProps["loaderData"]["funnel"];
+}) {
+  const { lessons } = funnel;
+  const formatPercent = (value: number) => `${Math.round(value * 100)}%`;
+
+  const dropOffIndex = lessons.findIndex((lesson) => lesson.isBiggestDropOff);
+  const dropOff = dropOffIndex === -1 ? null : lessons[dropOffIndex];
+
+  const barData = lessons.map((lesson, i) => ({
+    label: String(i + 1),
+    value: lesson.completionRate,
+    highlight: lesson.isBiggestDropOff,
+    tooltip: lesson.title,
+  }));
+
+  return (
+    <Card className="mt-4">
+      <CardContent className="p-5">
+        <div className="mb-1 flex items-center gap-2">
+          <Filter className="size-4 text-muted-foreground" />
+          <h2 className="text-sm font-medium">Lesson completion funnel</h2>
+        </div>
+        <p className="mb-4 text-xs text-muted-foreground">
+          Share of enrolled students who completed each lesson, in course order.
+        </p>
+
+        {lessons.length === 0 ? (
+          <p className="py-6 text-center text-sm text-muted-foreground">
+            This course has no lessons yet, so there&apos;s no completion funnel
+            to show. Add lessons to see where students fall off.
+          </p>
+        ) : (
+          <>
+            <BarChart
+              data={barData}
+              maxValue={1}
+              formatValue={formatPercent}
+              ariaLabel="Completion share for each lesson in course order"
+              className="text-blue-600 dark:text-blue-500"
+            />
+            {dropOff && (
+              <p className="mt-3 flex items-center gap-1.5 text-sm text-amber-700 dark:text-amber-500">
+                <TrendingDown className="size-4 shrink-0" />
+                <span>
+                  Biggest drop-off at lesson {dropOffIndex + 1}:{" "}
+                  <span className="font-medium">{dropOff.title}</span>
+                </span>
+              </p>
+            )}
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function InstructorCourseAnalytics({
   loaderData,
 }: Route.ComponentProps) {
-  const { course, analytics, trends } = loaderData;
+  const { course, analytics, trends, funnel } = loaderData;
   const hasStudents = analytics.enrollmentCount > 0;
 
   const revenueData = trends.weeks.map((week) => ({
@@ -255,6 +322,8 @@ export default function InstructorCourseAnalytics({
           colorClass="text-blue-600 dark:text-blue-500"
         />
       </div>
+
+      {hasStudents && <FunnelCard funnel={funnel} />}
     </div>
   );
 }

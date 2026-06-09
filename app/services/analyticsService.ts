@@ -255,3 +255,110 @@ export function getCourseTrends(courseId: number): CourseTrends {
 
   return { weeks };
 }
+
+// ─── Lesson-completion funnel ───
+// The course's lessons in module→lesson order, each with the share of enrolled
+// students who completed it, and a flag on the single lesson with the largest
+// drop from the previous one (PRD Stories 19, 20, 26). Completion shares come
+// from one set-based grouped scan — no per-lesson or per-student loop — and the
+// drop-off is found in a single linear pass over those aggregated rows. A
+// non-monotonic funnel (out-of-order or optional lessons) is an accepted caveat;
+// the biggest-drop highlight is a heuristic, not a guarantee.
+
+export type FunnelLesson = {
+  lessonId: number;
+  title: string;
+  /** Enrolled students who completed this lesson. */
+  completedCount: number;
+  /**
+   * Share of enrolled students who completed this lesson (0–1). 0 when nobody is
+   * enrolled, so the caller never divides by zero.
+   */
+  completionRate: number;
+  /**
+   * True for the single lesson with the largest decrease in completers versus
+   * the previous lesson. At most one lesson is flagged; ties resolve to the
+   * earliest lesson, and a never-decreasing funnel flags nothing.
+   */
+  isBiggestDropOff: boolean;
+};
+
+export type CourseFunnel = {
+  /** The denominator for every completion share: total enrolled students. */
+  enrollmentCount: number;
+  /** Lessons in module→lesson order. Empty when the course has no lessons. */
+  lessons: FunnelLesson[];
+};
+
+/**
+ * Lesson-completion funnel for a course. Returns lessons in module→lesson order
+ * with each lesson's completion share across enrolled students and the
+ * biggest-drop-off flag. A zero-lesson course yields an empty `lessons` array so
+ * the caller can suppress the chart with an explanation.
+ */
+export function getCourseFunnel(courseId: number): CourseFunnel {
+  const enrollmentRow = db
+    .select({ total: sql<number>`count(*)` })
+    .from(enrollments)
+    .where(eq(enrollments.courseId, courseId))
+    .get();
+  const enrollmentCount = enrollmentRow?.total ?? 0;
+
+  // One grouped scan yields a completed-by-enrolled-students count per lesson.
+  // The completion filter lives in the LEFT JOIN so lessons nobody finished
+  // still produce a row (count 0). The second LEFT JOIN keeps only completers
+  // who are actually enrolled in this course; `count(distinct enrollments.userId)`
+  // then ignores the nulls left by non-enrolled completers and unfinished lessons.
+  const rows = db
+    .select({
+      lessonId: lessons.id,
+      title: lessons.title,
+      completedCount: sql<number>`count(distinct ${enrollments.userId})`,
+    })
+    .from(lessons)
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .leftJoin(
+      lessonProgress,
+      and(
+        eq(lessonProgress.lessonId, lessons.id),
+        eq(lessonProgress.status, LessonProgressStatus.Completed)
+      )
+    )
+    .leftJoin(
+      enrollments,
+      and(
+        eq(enrollments.userId, lessonProgress.userId),
+        eq(enrollments.courseId, courseId)
+      )
+    )
+    .where(eq(modules.courseId, courseId))
+    .groupBy(lessons.id)
+    .orderBy(modules.position, lessons.position)
+    .all();
+
+  const funnelLessons: FunnelLesson[] = rows.map((row) => ({
+    lessonId: row.lessonId,
+    title: row.title,
+    completedCount: row.completedCount,
+    completionRate: enrollmentCount === 0 ? 0 : row.completedCount / enrollmentCount,
+    isBiggestDropOff: false,
+  }));
+
+  // Flag the lesson with the largest fall in completers from the lesson before
+  // it. The denominator is constant across lessons, so comparing raw counts is
+  // equivalent to comparing shares; a non-decreasing funnel flags nothing.
+  let dropIndex = -1;
+  let biggestDrop = 0;
+  for (let i = 1; i < funnelLessons.length; i++) {
+    const drop = funnelLessons[i - 1].completedCount - funnelLessons[i].completedCount;
+    if (drop > biggestDrop) {
+      biggestDrop = drop;
+      dropIndex = i;
+    }
+  }
+  if (dropIndex >= 0) {
+    funnelLessons[dropIndex].isBiggestDropOff = true;
+  }
+
+  return { enrollmentCount, lessons: funnelLessons };
+}

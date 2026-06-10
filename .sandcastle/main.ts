@@ -9,7 +9,7 @@ if (!prd || !plan) {
 }
 
 await run({
-  agent: claudeCode("claude-opus-4-6"),
+  agent: claudeCode("claude-opus-4-8"),
   sandbox: docker(),
   promptFile: "./.sandcastle/prompt.md",
   maxIterations: 3,

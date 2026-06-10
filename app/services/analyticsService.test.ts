@@ -14,9 +14,11 @@ vi.mock("~/db", () => ({
 // Import after the mock so the module picks up our test db.
 import {
   getCourseAnalytics,
+  getCourseBreakdown,
   getCourseTrends,
   getCourseFunnel,
   getCourseQuizDistributions,
+  getInstructorsWithCourses,
   getPortfolioAnalytics,
   getPortfolioTrends,
   getPlatformAnalytics,
@@ -1575,6 +1577,312 @@ describe("analyticsService", () => {
 
         expect(march?.revenue).toBe(7000);
       });
+    });
+  });
+
+  // ─── Course breakdown table ───
+
+  describe("getCourseBreakdown", () => {
+    const NOW = "2026-06-09T00:00:00.000Z";
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(NOW));
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    function daysAgo(n: number): string {
+      return new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString();
+    }
+
+    let courseSeq = 0;
+
+    function makeInstructor(name: string): number {
+      studentSeq += 1;
+      return testDb
+        .insert(schema.users)
+        .values({
+          name,
+          email: `breakdown-instructor-${studentSeq}@example.com`,
+          role: schema.UserRole.Instructor,
+        })
+        .returning()
+        .get().id;
+    }
+
+    function makeCourse(instructorId: number, title: string, price = 0) {
+      courseSeq += 1;
+      return testDb
+        .insert(schema.courses)
+        .values({
+          title,
+          slug: `breakdown-course-${courseSeq}`,
+          description: "A course",
+          instructorId,
+          categoryId: base.category.id,
+          status: schema.CourseStatus.Published,
+          price,
+        })
+        .returning()
+        .get();
+    }
+
+    function purchaseAt(opts: {
+      courseId: number;
+      pricePaid: number;
+      createdAt: string;
+    }) {
+      testDb
+        .insert(schema.purchases)
+        .values({
+          userId: makeStudent(),
+          courseId: opts.courseId,
+          pricePaid: opts.pricePaid,
+          country: null,
+          createdAt: opts.createdAt,
+        })
+        .run();
+    }
+
+    function enrollAt(opts: { courseId: number; enrolledAt: string }) {
+      testDb
+        .insert(schema.enrollments)
+        .values({
+          userId: makeStudent(),
+          courseId: opts.courseId,
+          enrolledAt: opts.enrolledAt,
+          completedAt: null,
+        })
+        .run();
+    }
+
+    function addRating(courseId: number, userId: number, rating: number) {
+      testDb
+        .insert(schema.courseReviews)
+        .values({ userId, courseId, rating })
+        .run();
+    }
+
+    it("returns an empty array when there are no courses", () => {
+      const instructorId = makeInstructor("No Courses");
+      const result = getCourseBreakdown("all", instructorId);
+      expect(result).toEqual([]);
+    });
+
+    it("returns all courses with their instructor names", () => {
+      const alice = makeInstructor("Alice");
+      const bob = makeInstructor("Bob");
+      makeCourse(alice, "Alice Course", 4999);
+      makeCourse(bob, "Bob Course", 2999);
+
+      const rows = getCourseBreakdown("all");
+
+      expect(rows).toHaveLength(3); // includes seedBaseData course
+      const aliceRow = rows.find((r) => r.title === "Alice Course");
+      const bobRow = rows.find((r) => r.title === "Bob Course");
+      expect(aliceRow?.instructorName).toBe("Alice");
+      expect(aliceRow?.listPrice).toBe(4999);
+      expect(bobRow?.instructorName).toBe("Bob");
+      expect(bobRow?.listPrice).toBe(2999);
+    });
+
+    it("sums revenue and counts sales within the time period", () => {
+      const inst = makeInstructor("Inst");
+      const course = makeCourse(inst, "Revenue Course");
+
+      purchaseAt({
+        courseId: course.id,
+        pricePaid: 5000,
+        createdAt: daysAgo(3),
+      });
+      purchaseAt({
+        courseId: course.id,
+        pricePaid: 3000,
+        createdAt: daysAgo(5),
+      });
+      purchaseAt({
+        courseId: course.id,
+        pricePaid: 2000,
+        createdAt: daysAgo(15),
+      });
+
+      const rows7d = getCourseBreakdown("7d");
+      const row7d = rows7d.find((r) => r.title === "Revenue Course");
+      expect(row7d?.revenue).toBe(8000);
+      expect(row7d?.sales).toBe(2);
+
+      const rows30d = getCourseBreakdown("30d");
+      const row30d = rows30d.find((r) => r.title === "Revenue Course");
+      expect(row30d?.revenue).toBe(10000);
+      expect(row30d?.sales).toBe(3);
+    });
+
+    it("counts enrollments within the time period", () => {
+      const inst = makeInstructor("Inst");
+      const course = makeCourse(inst, "Enrollment Course");
+
+      enrollAt({ courseId: course.id, enrolledAt: daysAgo(3) });
+      enrollAt({ courseId: course.id, enrolledAt: daysAgo(5) });
+      enrollAt({ courseId: course.id, enrolledAt: daysAgo(40) });
+
+      const rows7d = getCourseBreakdown("7d");
+      const row7d = rows7d.find((r) => r.title === "Enrollment Course");
+      expect(row7d?.enrollmentCount).toBe(2);
+
+      const rowsAll = getCourseBreakdown("all");
+      const rowAll = rowsAll.find((r) => r.title === "Enrollment Course");
+      expect(rowAll?.enrollmentCount).toBe(3);
+    });
+
+    it("computes average rating across reviews", () => {
+      const inst = makeInstructor("Inst");
+      const course = makeCourse(inst, "Rated Course");
+
+      const s1 = makeStudent();
+      const s2 = makeStudent();
+      const s3 = makeStudent();
+      addRating(course.id, s1, 5);
+      addRating(course.id, s2, 3);
+      addRating(course.id, s3, 4);
+
+      const rows = getCourseBreakdown("all");
+      const row = rows.find((r) => r.title === "Rated Course");
+      expect(row?.averageRating).toBe(4);
+    });
+
+    it("returns null average rating when there are no reviews", () => {
+      const inst = makeInstructor("Inst");
+      makeCourse(inst, "Unrated Course");
+
+      const rows = getCourseBreakdown("all");
+      const row = rows.find((r) => r.title === "Unrated Course");
+      expect(row?.averageRating).toBeNull();
+    });
+
+    it("filters by instructor when instructorId is provided", () => {
+      const alice = makeInstructor("Alice");
+      const bob = makeInstructor("Bob");
+      makeCourse(alice, "Alice Only");
+      makeCourse(bob, "Bob Only");
+
+      const aliceRows = getCourseBreakdown("all", alice);
+      expect(aliceRows.every((r) => r.instructorName === "Alice")).toBe(true);
+      expect(aliceRows.find((r) => r.title === "Alice Only")).toBeTruthy();
+      expect(aliceRows.find((r) => r.title === "Bob Only")).toBeFalsy();
+
+      const bobRows = getCourseBreakdown("all", bob);
+      expect(bobRows.every((r) => r.instructorName === "Bob")).toBe(true);
+    });
+
+    it("returns zero revenue and sales when there are no purchases", () => {
+      const inst = makeInstructor("Inst");
+      makeCourse(inst, "No Sales Course");
+
+      const rows = getCourseBreakdown("all");
+      const row = rows.find((r) => r.title === "No Sales Course");
+      expect(row?.revenue).toBe(0);
+      expect(row?.sales).toBe(0);
+    });
+  });
+
+  // ─── Instructors with courses ───
+
+  describe("getInstructorsWithCourses", () => {
+    it("returns only instructors who have at least one course", () => {
+      const result = getInstructorsWithCourses();
+
+      expect(result).toHaveLength(1);
+      expect(result[0].name).toBe("Test Instructor");
+    });
+
+    it("includes multiple instructors with courses, ordered by name", () => {
+      const zara = testDb
+        .insert(schema.users)
+        .values({
+          name: "Zara",
+          email: "zara-iwc@example.com",
+          role: schema.UserRole.Instructor,
+        })
+        .returning()
+        .get();
+
+      const alice = testDb
+        .insert(schema.users)
+        .values({
+          name: "Alice",
+          email: "alice-iwc@example.com",
+          role: schema.UserRole.Instructor,
+        })
+        .returning()
+        .get();
+
+      testDb
+        .insert(schema.courses)
+        .values({
+          title: "Zara Course",
+          slug: "zara-course",
+          description: "z",
+          instructorId: zara.id,
+          categoryId: base.category.id,
+          status: schema.CourseStatus.Published,
+        })
+        .run();
+
+      testDb
+        .insert(schema.courses)
+        .values({
+          title: "Alice Course",
+          slug: "alice-course",
+          description: "a",
+          instructorId: alice.id,
+          categoryId: base.category.id,
+          status: schema.CourseStatus.Published,
+        })
+        .run();
+
+      const result = getInstructorsWithCourses();
+
+      expect(result).toHaveLength(3);
+      expect(result[0].name).toBe("Alice");
+      expect(result[1].name).toBe("Test Instructor");
+      expect(result[2].name).toBe("Zara");
+    });
+
+    it("excludes instructors with no courses", () => {
+      testDb
+        .insert(schema.users)
+        .values({
+          name: "No Courses Instructor",
+          email: "nocourses-iwc@example.com",
+          role: schema.UserRole.Instructor,
+        })
+        .run();
+
+      const result = getInstructorsWithCourses();
+      expect(
+        result.find((i) => i.name === "No Courses Instructor")
+      ).toBeFalsy();
+    });
+
+    it("does not duplicate an instructor with multiple courses", () => {
+      testDb
+        .insert(schema.courses)
+        .values({
+          title: "Second Course",
+          slug: "second-course-iwc",
+          description: "second",
+          instructorId: base.instructor.id,
+          categoryId: base.category.id,
+          status: schema.CourseStatus.Published,
+        })
+        .run();
+
+      const result = getInstructorsWithCourses();
+      const matches = result.filter((i) => i.name === "Test Instructor");
+      expect(matches).toHaveLength(1);
     });
   });
 });

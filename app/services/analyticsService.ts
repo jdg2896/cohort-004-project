@@ -3,6 +3,7 @@ import type { AnySQLiteColumn } from "drizzle-orm/sqlite-core";
 import { db } from "~/db";
 import {
   courses,
+  courseReviews,
   enrollments,
   purchases,
   lessons,
@@ -894,4 +895,128 @@ export function getPlatformAnalytics(period: TimePeriod): PlatformAnalytics {
     totalEnrollments,
     topCourse: topRow ? { title: topRow.title, revenue: topRow.revenue } : null,
   };
+}
+
+// ─── Course breakdown table ───
+// Per-course rows for the admin dashboard table, with optional instructor
+// filtering. Revenue, sales, and enrollments respect the time period.
+// Average rating is all-time (ratings aren't timestamped meaningfully).
+
+export type CourseBreakdownRow = {
+  courseId: number;
+  title: string;
+  instructorName: string;
+  listPrice: number;
+  revenue: number;
+  sales: number;
+  enrollmentCount: number;
+  averageRating: number | null;
+};
+
+export function getCourseBreakdown(
+  period: TimePeriod,
+  instructorId?: number
+): CourseBreakdownRow[] {
+  const now = new Date();
+  const cutoff = timePeriodCutoff(period, now);
+
+  const courseFilter = instructorId
+    ? eq(courses.instructorId, instructorId)
+    : undefined;
+
+  const courseRows = db
+    .select({
+      id: courses.id,
+      title: courses.title,
+      price: courses.price,
+      instructorName: users.name,
+    })
+    .from(courses)
+    .innerJoin(users, eq(courses.instructorId, users.id))
+    .where(courseFilter)
+    .orderBy(courses.title)
+    .all();
+
+  if (courseRows.length === 0) return [];
+
+  const courseIds = courseRows.map((c) => c.id);
+
+  const purchaseConditions = [inArray(purchases.courseId, courseIds)];
+  if (cutoff) purchaseConditions.push(gte(purchases.createdAt, cutoff));
+
+  const revenueRows = db
+    .select({
+      courseId: purchases.courseId,
+      revenue: sql<number>`coalesce(sum(${purchases.pricePaid}), 0)`,
+      sales: sql<number>`count(*)`,
+    })
+    .from(purchases)
+    .where(and(...purchaseConditions))
+    .groupBy(purchases.courseId)
+    .all();
+
+  const enrollmentConditions = [inArray(enrollments.courseId, courseIds)];
+  if (cutoff) enrollmentConditions.push(gte(enrollments.enrolledAt, cutoff));
+
+  const enrollmentRows = db
+    .select({
+      courseId: enrollments.courseId,
+      total: sql<number>`count(*)`,
+    })
+    .from(enrollments)
+    .where(and(...enrollmentConditions))
+    .groupBy(enrollments.courseId)
+    .all();
+
+  const ratingRows = db
+    .select({
+      courseId: courseReviews.courseId,
+      average: sql<number>`avg(${courseReviews.rating})`,
+    })
+    .from(courseReviews)
+    .where(inArray(courseReviews.courseId, courseIds))
+    .groupBy(courseReviews.courseId)
+    .all();
+
+  const revenueByCourse = new Map(
+    revenueRows.map((r) => [r.courseId, { revenue: r.revenue, sales: r.sales }])
+  );
+  const enrollmentByCourse = new Map(
+    enrollmentRows.map((r) => [r.courseId, r.total])
+  );
+  const ratingByCourse = new Map(
+    ratingRows.map((r) => [r.courseId, r.average])
+  );
+
+  return courseRows.map((c) => {
+    const rev = revenueByCourse.get(c.id);
+    return {
+      courseId: c.id,
+      title: c.title,
+      instructorName: c.instructorName,
+      listPrice: c.price,
+      revenue: rev?.revenue ?? 0,
+      sales: rev?.sales ?? 0,
+      enrollmentCount: enrollmentByCourse.get(c.id) ?? 0,
+      averageRating: ratingByCourse.get(c.id) ?? null,
+    };
+  });
+}
+
+export type InstructorOption = {
+  id: number;
+  name: string;
+};
+
+export function getInstructorsWithCourses(): InstructorOption[] {
+  return db
+    .select({
+      id: users.id,
+      name: users.name,
+    })
+    .from(users)
+    .innerJoin(courses, eq(courses.instructorId, users.id))
+    .groupBy(users.id)
+    .orderBy(users.name)
+    .all();
 }

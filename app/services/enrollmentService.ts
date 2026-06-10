@@ -3,15 +3,18 @@ import { db } from "~/db";
 import {
   enrollments,
   courses,
+  users,
   modules,
   lessons,
   lessonProgress,
   LessonProgressStatus,
+  NotificationType,
 } from "~/db/schema";
 import {
   getTotalLessonCount,
   getCompletedLessonCount,
 } from "~/services/progressService";
+import { createNotification } from "~/services/notificationService";
 
 // ─── Enrollment Service ───
 // Handles enrollment, unenrollment, duplicate prevention, and enrollment validation.
@@ -91,12 +94,40 @@ export function enrollUser(
     .returning()
     .get();
 
+  // Side effect: let the course's instructor know a student enrolled. Best-effort
+  // — a missing course or student (only reachable via skipValidation) is skipped
+  // rather than failing the enrollment.
+  notifyInstructorOfEnrollment(userId, courseId);
+
   // sendEmail parameter accepted but not implemented (no email service — PRD out of scope)
   if (sendEmail) {
     // Would send welcome email here
   }
 
   return enrollment;
+}
+
+function notifyInstructorOfEnrollment(userId: number, courseId: number) {
+  const course = db
+    .select({ instructorId: courses.instructorId, title: courses.title })
+    .from(courses)
+    .where(eq(courses.id, courseId))
+    .get();
+  const student = db
+    .select({ name: users.name })
+    .from(users)
+    .where(eq(users.id, userId))
+    .get();
+
+  if (!course || !student) return;
+
+  createNotification({
+    recipientUserId: course.instructorId,
+    type: NotificationType.Enrollment,
+    title: "New Enrollment",
+    message: `${student.name} enrolled in ${course.title}`,
+    linkUrl: `/instructor/${courseId}/students`,
+  });
 }
 
 export function unenrollUser(userId: number, courseId: number) {

@@ -43,6 +43,13 @@ export enum CommentModerationAction {
   HardDelete = "hard_delete",
 }
 
+// In-app notification kinds. Intentionally open-ended: the notifications table is
+// generic (title/message/linkUrl) so new types can be added here without a schema
+// change. Only "enrollment" is produced today.
+export enum NotificationType {
+  Enrollment = "enrollment",
+}
+
 // ─── Tables ───
 
 export const users = sqliteTable("users", {
@@ -336,6 +343,25 @@ export const lessonBookmarks = sqliteTable(
   },
   (table) => [unique().on(table.userId, table.lessonId)]
 );
+
+// Generic in-app notifications. A notification belongs to one recipient and
+// carries a type plus a human-readable title/message and an optional linkUrl to
+// navigate to when clicked. Read state is tracked per row. The schema is
+// deliberately type-agnostic so future notification kinds reuse it as-is.
+export const notifications = sqliteTable("notifications", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  recipientUserId: integer("recipient_user_id")
+    .notNull()
+    .references(() => users.id),
+  type: text("type").notNull().$type<NotificationType>(),
+  title: text("title").notNull(),
+  message: text("message").notNull(),
+  linkUrl: text("link_url"),
+  isRead: integer("is_read", { mode: "boolean" }).notNull().default(false),
+  createdAt: text("created_at")
+    .notNull()
+    .$defaultFn(() => new Date().toISOString()),
+});
 
 // Append-only audit trail for moderator deletions of other users' comments.
 // commentId is intentionally NOT a foreign key so the audit row survives a hard

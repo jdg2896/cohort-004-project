@@ -27,6 +27,7 @@ import {
   markEnrollmentComplete,
   markEnrollmentCompleteIfFinished,
 } from "./enrollmentService";
+import { getNotifications } from "./notificationService";
 
 describe("enrollmentService", () => {
   beforeEach(() => {
@@ -375,6 +376,39 @@ describe("enrollmentService", () => {
 
       expect(result).toBeUndefined();
       expect(findEnrollment(base.user.id, base.course.id)).toBeUndefined();
+    });
+  });
+
+  describe("enrollment notifications", () => {
+    it("notifies the course's instructor when a student enrolls", () => {
+      enrollUser(base.user.id, base.course.id, false, false);
+
+      const notifications = getNotifications({
+        userId: base.instructor.id,
+        limit: 10,
+        offset: 0,
+      });
+
+      expect(notifications).toHaveLength(1);
+      expect(notifications[0].type).toBe(schema.NotificationType.Enrollment);
+      expect(notifications[0].title).toBe("New Enrollment");
+      expect(notifications[0].message).toBe("Test User enrolled in Test Course");
+      expect(notifications[0].linkUrl).toBe(
+        `/instructor/${base.course.id}/students`
+      );
+      expect(notifications[0].isRead).toBe(false);
+    });
+
+    it("does not notify the enrolling student", () => {
+      enrollUser(base.user.id, base.course.id, false, false);
+
+      const studentNotifications = getNotifications({
+        userId: base.user.id,
+        limit: 10,
+        offset: 0,
+      });
+
+      expect(studentNotifications).toHaveLength(0);
     });
   });
 });

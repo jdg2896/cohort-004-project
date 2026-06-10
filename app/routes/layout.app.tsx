@@ -13,6 +13,14 @@ import {
 } from "~/services/progressService";
 import { getCountryTierInfo, COUNTRIES } from "~/lib/ppp";
 import { isTeamAdmin } from "~/services/teamService";
+import {
+  getNotifications,
+  getUnreadCount,
+} from "~/services/notificationService";
+import { UserRole } from "~/db/schema";
+
+// How many recent notifications the bell dropdown shows.
+const NOTIFICATION_PREVIEW_LIMIT = 5;
 
 export async function loader({ request }: Route.LoaderArgs) {
   const users = getAllUsers();
@@ -46,6 +54,19 @@ export async function loader({ request }: Route.LoaderArgs) {
       })
     : [];
 
+  // Notifications are an instructor-only feature, so only fetch them for instructors.
+  const isInstructor = currentUser?.role === UserRole.Instructor;
+  const notifications = isInstructor
+    ? getNotifications({
+        userId: currentUser.id,
+        limit: NOTIFICATION_PREVIEW_LIMIT,
+        offset: 0,
+      })
+    : [];
+  const unreadNotificationCount = isInstructor
+    ? getUnreadCount(currentUser.id)
+    : 0;
+
   return {
     users: users.map((u) => ({ id: u.id, name: u.name, role: u.role })),
     currentUser: currentUser
@@ -57,6 +78,15 @@ export async function loader({ request }: Route.LoaderArgs) {
         }
       : null,
     recentCourses,
+    notifications: notifications.map((n) => ({
+      id: n.id,
+      title: n.title,
+      message: n.message,
+      linkUrl: n.linkUrl,
+      isRead: n.isRead,
+      createdAt: n.createdAt,
+    })),
+    unreadNotificationCount,
     devCountry,
     countryTierInfo,
     countries: COUNTRIES,
@@ -69,6 +99,8 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
     users,
     currentUser,
     recentCourses,
+    notifications,
+    unreadNotificationCount,
     devCountry,
     countryTierInfo,
     countries,
@@ -80,6 +112,8 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
       <Sidebar
         currentUser={currentUser}
         recentCourses={recentCourses}
+        notifications={notifications}
+        unreadNotificationCount={unreadNotificationCount}
         isTeamAdmin={userIsTeamAdmin}
       />
       <main className="flex-1 overflow-y-auto">

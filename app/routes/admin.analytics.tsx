@@ -7,6 +7,7 @@ import {
 import type { Route } from "./+types/admin.analytics";
 import {
   getPlatformAnalytics,
+  getPlatformRevenueTrend,
   type TimePeriod,
 } from "~/services/analyticsService";
 import { getUserById } from "~/services/userService";
@@ -15,6 +16,7 @@ import { UserRole } from "~/db/schema";
 import { cn, formatMoney } from "~/lib/utils";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
+import { TrendChart } from "~/components/trend-chart";
 import {
   AlertTriangle,
   BarChart3,
@@ -66,8 +68,9 @@ export async function loader({ request }: Route.LoaderArgs) {
     : "30d";
 
   const analytics = getPlatformAnalytics(period);
+  const revenueTrend = getPlatformRevenueTrend(period);
 
-  return { analytics, period };
+  return { analytics, period, revenueTrend };
 }
 
 function StatTile({
@@ -125,8 +128,32 @@ function TimePeriodTabs({ current }: { current: TimePeriod }) {
   );
 }
 
+const SHORT_MONTHS = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+];
+
+function formatDateLabel(date: string, period: TimePeriod): string {
+  if (period === "7d" || period === "30d") {
+    const [, month, day] = date.split("-");
+    return `${parseInt(month, 10)}/${parseInt(day, 10)}`;
+  }
+  const [year, month] = date.split("-");
+  return `${SHORT_MONTHS[parseInt(month, 10) - 1]} '${year.slice(2)}`;
+}
+
 export default function AdminAnalytics({ loaderData }: Route.ComponentProps) {
-  const { analytics, period } = loaderData;
+  const { analytics, period, revenueTrend } = loaderData;
 
   const isEmpty =
     analytics.totalRevenue === 0 && analytics.totalEnrollments === 0;
@@ -161,28 +188,50 @@ export default function AdminAnalytics({ loaderData }: Route.ComponentProps) {
           </p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          <StatTile
-            label="Total Revenue"
-            value={formatMoney(analytics.totalRevenue)}
-            icon={DollarSign}
-          />
-          <StatTile
-            label="Total Enrollments"
-            value={String(analytics.totalEnrollments)}
-            icon={Users}
-          />
-          <StatTile
-            label="Top Earning Course"
-            value={analytics.topCourse?.title ?? "—"}
-            hint={
-              analytics.topCourse
-                ? formatMoney(analytics.topCourse.revenue)
-                : undefined
-            }
-            icon={Trophy}
-          />
-        </div>
+        <>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <StatTile
+              label="Total Revenue"
+              value={formatMoney(analytics.totalRevenue)}
+              icon={DollarSign}
+            />
+            <StatTile
+              label="Total Enrollments"
+              value={String(analytics.totalEnrollments)}
+              icon={Users}
+            />
+            <StatTile
+              label="Top Earning Course"
+              value={analytics.topCourse?.title ?? "—"}
+              hint={
+                analytics.topCourse
+                  ? formatMoney(analytics.topCourse.revenue)
+                  : undefined
+              }
+              icon={Trophy}
+            />
+          </div>
+
+          {revenueTrend.length > 0 && (
+            <Card className="mt-4">
+              <CardContent className="p-5">
+                <h2 className="mb-3 flex items-center gap-2 text-sm font-medium">
+                  <DollarSign className="size-4 text-muted-foreground" />
+                  Revenue over time
+                </h2>
+                <TrendChart
+                  data={revenueTrend.map((p) => ({
+                    label: formatDateLabel(p.date, period),
+                    value: p.revenue,
+                  }))}
+                  formatValue={formatMoney}
+                  ariaLabel="Combined revenue over time across all courses"
+                  className="text-emerald-600 dark:text-emerald-500"
+                />
+              </CardContent>
+            </Card>
+          )}
+        </>
       )}
     </div>
   );

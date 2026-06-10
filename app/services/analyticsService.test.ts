@@ -20,6 +20,7 @@ import {
   getPortfolioAnalytics,
   getPortfolioTrends,
   getPlatformAnalytics,
+  getPlatformRevenueTrend,
 } from "./analyticsService";
 
 describe("analyticsService", () => {
@@ -1339,6 +1340,241 @@ describe("analyticsService", () => {
 
       expect(result.topCourse?.title).toBe("Recent Winner");
       expect(result.topCourse?.revenue).toBe(3000);
+    });
+  });
+
+  // ─── Platform revenue trend ───
+
+  describe("getPlatformRevenueTrend", () => {
+    const NOW = "2026-06-09T00:00:00.000Z";
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(NOW));
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    function daysAgo(n: number): string {
+      return new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString();
+    }
+
+    let courseSeq = 0;
+
+    function makeInstructor(): number {
+      studentSeq += 1;
+      return testDb
+        .insert(schema.users)
+        .values({
+          name: `Instructor ${studentSeq}`,
+          email: `trend-instructor-${studentSeq}@example.com`,
+          role: schema.UserRole.Instructor,
+        })
+        .returning()
+        .get().id;
+    }
+
+    function makeCourse(instructorId: number, title: string) {
+      courseSeq += 1;
+      return testDb
+        .insert(schema.courses)
+        .values({
+          title,
+          slug: `trend-course-${courseSeq}`,
+          description: "A trend course",
+          instructorId,
+          categoryId: base.category.id,
+          status: schema.CourseStatus.Published,
+        })
+        .returning()
+        .get();
+    }
+
+    function purchaseAt(opts: {
+      courseId: number;
+      pricePaid: number;
+      createdAt: string;
+    }) {
+      testDb
+        .insert(schema.purchases)
+        .values({
+          userId: makeStudent(),
+          courseId: opts.courseId,
+          pricePaid: opts.pricePaid,
+          country: null,
+          createdAt: opts.createdAt,
+        })
+        .run();
+    }
+
+    describe("daily granularity (7d, 30d)", () => {
+      it("returns a zero-filled daily series for 7d when there are no purchases", () => {
+        const points = getPlatformRevenueTrend("7d");
+
+        expect(points.length).toBe(8); // 7 days ago through today
+        expect(points.every((p) => p.revenue === 0)).toBe(true);
+        expect(points[0].date).toBe("2026-06-02");
+        expect(points[points.length - 1].date).toBe("2026-06-09");
+      });
+
+      it("returns a zero-filled daily series for 30d", () => {
+        const points = getPlatformRevenueTrend("30d");
+
+        expect(points.length).toBe(31); // 30 days ago through today
+        expect(points[0].date).toBe("2026-05-10");
+        expect(points[points.length - 1].date).toBe("2026-06-09");
+      });
+
+      it("buckets revenue into the correct day", () => {
+        purchaseAt({
+          courseId: base.course.id,
+          pricePaid: 5000,
+          createdAt: "2026-06-07T12:00:00.000Z",
+        });
+
+        const points = getPlatformRevenueTrend("7d");
+        const june7 = points.find((p) => p.date === "2026-06-07");
+
+        expect(june7?.revenue).toBe(5000);
+        expect(
+          points
+            .filter((p) => p.date !== "2026-06-07")
+            .every((p) => p.revenue === 0)
+        ).toBe(true);
+      });
+
+      it("sums multiple purchases on the same day", () => {
+        purchaseAt({
+          courseId: base.course.id,
+          pricePaid: 3000,
+          createdAt: "2026-06-08T10:00:00.000Z",
+        });
+        purchaseAt({
+          courseId: base.course.id,
+          pricePaid: 2000,
+          createdAt: "2026-06-08T18:00:00.000Z",
+        });
+
+        const points = getPlatformRevenueTrend("7d");
+        const june8 = points.find((p) => p.date === "2026-06-08");
+
+        expect(june8?.revenue).toBe(5000);
+      });
+
+      it("excludes purchases outside the time window", () => {
+        purchaseAt({
+          courseId: base.course.id,
+          pricePaid: 9999,
+          createdAt: daysAgo(10),
+        });
+        purchaseAt({
+          courseId: base.course.id,
+          pricePaid: 4000,
+          createdAt: daysAgo(3),
+        });
+
+        const points = getPlatformRevenueTrend("7d");
+        const total = points.reduce((sum, p) => sum + p.revenue, 0);
+
+        expect(total).toBe(4000);
+      });
+
+      it("aggregates revenue across all instructors and courses", () => {
+        const other = makeInstructor();
+        const otherCourse = makeCourse(other, "Other Course");
+
+        purchaseAt({
+          courseId: base.course.id,
+          pricePaid: 3000,
+          createdAt: "2026-06-08T10:00:00.000Z",
+        });
+        purchaseAt({
+          courseId: otherCourse.id,
+          pricePaid: 2000,
+          createdAt: "2026-06-08T14:00:00.000Z",
+        });
+
+        const points = getPlatformRevenueTrend("7d");
+        const june8 = points.find((p) => p.date === "2026-06-08");
+
+        expect(june8?.revenue).toBe(5000);
+      });
+    });
+
+    describe("monthly granularity (12m, all)", () => {
+      it("returns a zero-filled monthly series for 12m", () => {
+        const points = getPlatformRevenueTrend("12m");
+
+        expect(points[0].date).toBe("2025-06");
+        expect(points[points.length - 1].date).toBe("2026-06");
+        expect(points.length).toBe(13); // Jun 2025 through Jun 2026
+        expect(points.every((p) => p.revenue === 0)).toBe(true);
+      });
+
+      it("buckets revenue into the correct month for 12m", () => {
+        purchaseAt({
+          courseId: base.course.id,
+          pricePaid: 7500,
+          createdAt: "2026-03-15T12:00:00.000Z",
+        });
+
+        const points = getPlatformRevenueTrend("12m");
+        const march = points.find((p) => p.date === "2026-03");
+
+        expect(march?.revenue).toBe(7500);
+      });
+
+      it("returns an empty array for 'all' when there are no purchases", () => {
+        const points = getPlatformRevenueTrend("all");
+
+        expect(points).toEqual([]);
+      });
+
+      it("spans from earliest purchase month to current month for 'all'", () => {
+        purchaseAt({
+          courseId: base.course.id,
+          pricePaid: 1000,
+          createdAt: "2025-11-20T10:00:00.000Z",
+        });
+        purchaseAt({
+          courseId: base.course.id,
+          pricePaid: 2000,
+          createdAt: "2026-04-10T10:00:00.000Z",
+        });
+
+        const points = getPlatformRevenueTrend("all");
+
+        expect(points[0].date).toBe("2025-11");
+        expect(points[points.length - 1].date).toBe("2026-06");
+        expect(points.length).toBe(8); // Nov 2025 through Jun 2026
+
+        expect(points.find((p) => p.date === "2025-11")?.revenue).toBe(1000);
+        expect(points.find((p) => p.date === "2026-04")?.revenue).toBe(2000);
+        expect(points.find((p) => p.date === "2026-01")?.revenue).toBe(0);
+      });
+
+      it("sums revenue from all instructors into monthly buckets", () => {
+        const other = makeInstructor();
+        const otherCourse = makeCourse(other, "Other Course");
+
+        purchaseAt({
+          courseId: base.course.id,
+          pricePaid: 3000,
+          createdAt: "2026-03-10T10:00:00.000Z",
+        });
+        purchaseAt({
+          courseId: otherCourse.id,
+          pricePaid: 4000,
+          createdAt: "2026-03-20T10:00:00.000Z",
+        });
+
+        const points = getPlatformRevenueTrend("12m");
+        const march = points.find((p) => p.date === "2026-03");
+
+        expect(march?.revenue).toBe(7000);
+      });
     });
   });
 });

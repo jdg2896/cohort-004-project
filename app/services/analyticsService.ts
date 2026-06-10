@@ -744,6 +744,120 @@ function timePeriodCutoff(period: TimePeriod, now: Date): string | null {
   }
 }
 
+export type RevenueTimePoint = {
+  /** "YYYY-MM-DD" for daily granularity, "YYYY-MM" for monthly. */
+  date: string;
+  /** Gross revenue in cents for this bucket. */
+  revenue: number;
+};
+
+/**
+ * Platform-wide revenue time series for the admin chart. Daily granularity for
+ * 7d/30d, monthly for 12m/all. Zero-filled across the full window so gaps
+ * render as $0 rather than being skipped. For "all" with no purchases, returns
+ * an empty array (the caller hides the chart).
+ */
+export function getPlatformRevenueTrend(
+  period: TimePeriod
+): RevenueTimePoint[] {
+  const now = new Date();
+  const cutoff = timePeriodCutoff(period, now);
+
+  if (period === "7d" || period === "30d") {
+    return buildDailyRevenueTrend(cutoff!, now);
+  }
+  return buildMonthlyRevenueTrend(cutoff, now);
+}
+
+function buildDailyRevenueTrend(cutoff: string, now: Date): RevenueTimePoint[] {
+  const startDate = cutoff.slice(0, 10);
+  const endDate = now.toISOString().slice(0, 10);
+
+  const points: RevenueTimePoint[] = [];
+  const current = new Date(startDate + "T00:00:00.000Z");
+  const end = new Date(endDate + "T00:00:00.000Z");
+  while (current <= end) {
+    points.push({ date: current.toISOString().slice(0, 10), revenue: 0 });
+    current.setUTCDate(current.getUTCDate() + 1);
+  }
+
+  const rows = db
+    .select({
+      day: sql<string>`date(${purchases.createdAt})`,
+      total: sql<number>`coalesce(sum(${purchases.pricePaid}), 0)`,
+    })
+    .from(purchases)
+    .where(gte(purchases.createdAt, cutoff))
+    .groupBy(sql`date(${purchases.createdAt})`)
+    .all();
+
+  const byDay = new Map(rows.map((r) => [r.day, r.total]));
+  for (const p of points) {
+    p.revenue = byDay.get(p.date) ?? 0;
+  }
+
+  return points;
+}
+
+function buildMonthlyRevenueTrend(
+  cutoff: string | null,
+  now: Date
+): RevenueTimePoint[] {
+  let startYear: number, startMonth: number;
+
+  if (cutoff) {
+    const d = new Date(cutoff);
+    startYear = d.getUTCFullYear();
+    startMonth = d.getUTCMonth();
+  } else {
+    const earliest = db
+      .select({ min: sql<string | null>`min(${purchases.createdAt})` })
+      .from(purchases)
+      .get();
+
+    if (!earliest?.min) return [];
+
+    const d = new Date(earliest.min);
+    startYear = d.getUTCFullYear();
+    startMonth = d.getUTCMonth();
+  }
+
+  const endYear = now.getUTCFullYear();
+  const endMonth = now.getUTCMonth();
+
+  const points: RevenueTimePoint[] = [];
+  let y = startYear,
+    m = startMonth;
+  while (y < endYear || (y === endYear && m <= endMonth)) {
+    points.push({
+      date: `${y}-${String(m + 1).padStart(2, "0")}`,
+      revenue: 0,
+    });
+    m++;
+    if (m > 11) {
+      m = 0;
+      y++;
+    }
+  }
+
+  const rows = db
+    .select({
+      month: sql<string>`strftime('%Y-%m', ${purchases.createdAt})`,
+      total: sql<number>`coalesce(sum(${purchases.pricePaid}), 0)`,
+    })
+    .from(purchases)
+    .where(cutoff ? gte(purchases.createdAt, cutoff) : undefined)
+    .groupBy(sql`strftime('%Y-%m', ${purchases.createdAt})`)
+    .all();
+
+  const byMonth = new Map(rows.map((r) => [r.month, r.total]));
+  for (const p of points) {
+    p.revenue = byMonth.get(p.date) ?? 0;
+  }
+
+  return points;
+}
+
 export function getPlatformAnalytics(period: TimePeriod): PlatformAnalytics {
   const now = new Date();
   const cutoff = timePeriodCutoff(period, now);

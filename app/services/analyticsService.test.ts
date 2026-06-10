@@ -19,6 +19,7 @@ import {
   getCourseQuizDistributions,
   getPortfolioAnalytics,
   getPortfolioTrends,
+  getPlatformAnalytics,
 } from "./analyticsService";
 
 describe("analyticsService", () => {
@@ -477,7 +478,9 @@ describe("analyticsService", () => {
 
       expect(funnel.enrollmentCount).toBe(4);
       expect(funnel.lessons.map((l) => l.completedCount)).toEqual([4, 2, 1]);
-      expect(funnel.lessons.map((l) => l.completionRate)).toEqual([1, 0.5, 0.25]);
+      expect(funnel.lessons.map((l) => l.completionRate)).toEqual([
+        1, 0.5, 0.25,
+      ]);
     });
 
     it("counts only enrolled students' completions", () => {
@@ -824,7 +827,11 @@ describe("analyticsService", () => {
     }
 
     // Enrolls an existing user (unlike top-level `enroll`, which makes a new one).
-    function enrollUser(userId: number, courseId: number, completedAt?: string) {
+    function enrollUser(
+      userId: number,
+      courseId: number,
+      completedAt?: string
+    ) {
       testDb
         .insert(schema.enrollments)
         .values({ userId, courseId, completedAt: completedAt ?? null })
@@ -1107,6 +1114,231 @@ describe("analyticsService", () => {
 
         expect(weeks.reduce((sum, w) => sum + w.revenue, 0)).toBe(4000);
       });
+    });
+  });
+
+  // ─── Platform-wide admin analytics ───
+
+  describe("getPlatformAnalytics", () => {
+    const NOW = "2026-06-09T00:00:00.000Z";
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(NOW));
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    function daysAgo(n: number): string {
+      return new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString();
+    }
+
+    let courseSeq = 0;
+
+    function makeInstructor(): number {
+      studentSeq += 1;
+      return testDb
+        .insert(schema.users)
+        .values({
+          name: `Instructor ${studentSeq}`,
+          email: `platform-instructor-${studentSeq}@example.com`,
+          role: schema.UserRole.Instructor,
+        })
+        .returning()
+        .get().id;
+    }
+
+    function makeCourse(instructorId: number, title: string) {
+      courseSeq += 1;
+      return testDb
+        .insert(schema.courses)
+        .values({
+          title,
+          slug: `platform-course-${courseSeq}`,
+          description: "A platform course",
+          instructorId,
+          categoryId: base.category.id,
+          status: schema.CourseStatus.Published,
+        })
+        .returning()
+        .get();
+    }
+
+    function purchaseAt(opts: {
+      courseId: number;
+      pricePaid: number;
+      createdAt: string;
+    }) {
+      testDb
+        .insert(schema.purchases)
+        .values({
+          userId: makeStudent(),
+          courseId: opts.courseId,
+          pricePaid: opts.pricePaid,
+          country: null,
+          createdAt: opts.createdAt,
+        })
+        .run();
+    }
+
+    function enrollAt(opts: { courseId: number; enrolledAt: string }) {
+      testDb
+        .insert(schema.enrollments)
+        .values({
+          userId: makeStudent(),
+          courseId: opts.courseId,
+          enrolledAt: opts.enrolledAt,
+          completedAt: null,
+        })
+        .run();
+    }
+
+    it("returns zeros and null top course when there is no data", () => {
+      const result = getPlatformAnalytics("all");
+
+      expect(result.totalRevenue).toBe(0);
+      expect(result.totalEnrollments).toBe(0);
+      expect(result.topCourse).toBeNull();
+    });
+
+    it("sums revenue and enrollments across all instructors and courses", () => {
+      const other = makeInstructor();
+      const otherCourse = makeCourse(other, "Other Course");
+
+      purchaseAt({
+        courseId: base.course.id,
+        pricePaid: 5000,
+        createdAt: daysAgo(3),
+      });
+      purchaseAt({
+        courseId: otherCourse.id,
+        pricePaid: 2500,
+        createdAt: daysAgo(3),
+      });
+      enrollAt({ courseId: base.course.id, enrolledAt: daysAgo(3) });
+      enrollAt({ courseId: otherCourse.id, enrolledAt: daysAgo(3) });
+
+      const result = getPlatformAnalytics("all");
+
+      expect(result.totalRevenue).toBe(7500);
+      expect(result.totalEnrollments).toBe(2);
+    });
+
+    it("identifies the top earning course", () => {
+      const other = makeInstructor();
+      const otherCourse = makeCourse(other, "Big Earner");
+
+      purchaseAt({
+        courseId: base.course.id,
+        pricePaid: 1000,
+        createdAt: daysAgo(3),
+      });
+      purchaseAt({
+        courseId: otherCourse.id,
+        pricePaid: 9999,
+        createdAt: daysAgo(3),
+      });
+
+      const result = getPlatformAnalytics("all");
+
+      expect(result.topCourse).toEqual({
+        title: "Big Earner",
+        revenue: 9999,
+      });
+    });
+
+    it("filters to the 7d window", () => {
+      purchaseAt({
+        courseId: base.course.id,
+        pricePaid: 5000,
+        createdAt: daysAgo(3),
+      });
+      purchaseAt({
+        courseId: base.course.id,
+        pricePaid: 2000,
+        createdAt: daysAgo(10),
+      });
+      enrollAt({ courseId: base.course.id, enrolledAt: daysAgo(3) });
+      enrollAt({ courseId: base.course.id, enrolledAt: daysAgo(10) });
+
+      const result = getPlatformAnalytics("7d");
+
+      expect(result.totalRevenue).toBe(5000);
+      expect(result.totalEnrollments).toBe(1);
+    });
+
+    it("filters to the 30d window", () => {
+      purchaseAt({
+        courseId: base.course.id,
+        pricePaid: 5000,
+        createdAt: daysAgo(15),
+      });
+      purchaseAt({
+        courseId: base.course.id,
+        pricePaid: 2000,
+        createdAt: daysAgo(60),
+      });
+
+      const result = getPlatformAnalytics("30d");
+
+      expect(result.totalRevenue).toBe(5000);
+    });
+
+    it("filters to the 12m window", () => {
+      purchaseAt({
+        courseId: base.course.id,
+        pricePaid: 5000,
+        createdAt: daysAgo(100),
+      });
+      purchaseAt({
+        courseId: base.course.id,
+        pricePaid: 2000,
+        createdAt: daysAgo(400),
+      });
+
+      const result = getPlatformAnalytics("12m");
+
+      expect(result.totalRevenue).toBe(5000);
+    });
+
+    it("includes all data with the 'all' period", () => {
+      purchaseAt({
+        courseId: base.course.id,
+        pricePaid: 5000,
+        createdAt: daysAgo(3),
+      });
+      purchaseAt({
+        courseId: base.course.id,
+        pricePaid: 2000,
+        createdAt: daysAgo(400),
+      });
+
+      const result = getPlatformAnalytics("all");
+
+      expect(result.totalRevenue).toBe(7000);
+    });
+
+    it("scopes the top course to the selected time period", () => {
+      const other = makeInstructor();
+      const otherCourse = makeCourse(other, "Recent Winner");
+
+      purchaseAt({
+        courseId: base.course.id,
+        pricePaid: 9000,
+        createdAt: daysAgo(60),
+      });
+      purchaseAt({
+        courseId: otherCourse.id,
+        pricePaid: 3000,
+        createdAt: daysAgo(3),
+      });
+
+      const result = getPlatformAnalytics("30d");
+
+      expect(result.topCourse?.title).toBe("Recent Winner");
+      expect(result.topCourse?.revenue).toBe(3000);
     });
   });
 });

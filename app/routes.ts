@@ -46,6 +46,7 @@ export default [
     route("admin/courses", "routes/admin.courses.tsx"),
     route("admin/categories", "routes/admin.categories.tsx"),
     route("admin/moderation", "routes/admin.moderation.tsx"),
+    route("admin/analytics", "routes/admin.analytics.tsx"),
     route("settings", "routes/settings.tsx"),
     route("team", "routes/team.tsx"),
     route("redeem/:code", "routes/redeem.$code.tsx"),
@@ -57,10 +58,7 @@ export default [
   route("api/video-tracking", "routes/api.video-tracking.ts"),
   route("api/course-review", "routes/api.course-review.ts"),
   route("api/set-dev-country", "routes/api.set-dev-country.ts"),
-  route(
-    "api/notifications/mark-read",
-    "routes/api.notifications.mark-read.ts"
-  ),
+  route("api/notifications/mark-read", "routes/api.notifications.mark-read.ts"),
   route(
     "api/notifications/mark-all-read",
     "routes/api.notifications.mark-all-read.ts"

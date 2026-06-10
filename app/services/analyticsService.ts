@@ -1,4 +1,4 @@
-import { eq, and, gte, inArray, sql } from "drizzle-orm";
+import { eq, and, gte, inArray, sql, desc } from "drizzle-orm";
 import type { AnySQLiteColumn } from "drizzle-orm/sqlite-core";
 import { db } from "~/db";
 import {
@@ -11,6 +11,7 @@ import {
   LessonProgressStatus,
   quizzes,
   quizAttempts,
+  users,
 } from "~/db/schema";
 
 // ─── Analytics Service ───
@@ -175,7 +176,8 @@ function computeWeekWindow(now: Date): {
   windowStartIso: string;
   weekStarts: string[];
 } {
-  const windowStartMs = now.getTime() - TREND_WEEKS * DAYS_PER_WEEK * MS_PER_DAY;
+  const windowStartMs =
+    now.getTime() - TREND_WEEKS * DAYS_PER_WEEK * MS_PER_DAY;
   const weekStarts: string[] = [];
   for (let i = 0; i < TREND_WEEKS; i++) {
     const start = new Date(windowStartMs + i * DAYS_PER_WEEK * MS_PER_DAY);
@@ -354,7 +356,8 @@ export function getCourseFunnel(courseId: number): CourseFunnel {
     lessonId: row.lessonId,
     title: row.title,
     completedCount: row.completedCount,
-    completionRate: enrollmentCount === 0 ? 0 : row.completedCount / enrollmentCount,
+    completionRate:
+      enrollmentCount === 0 ? 0 : row.completedCount / enrollmentCount,
     isBiggestDropOff: false,
   }));
 
@@ -364,7 +367,8 @@ export function getCourseFunnel(courseId: number): CourseFunnel {
   let dropIndex = -1;
   let biggestDrop = 0;
   for (let i = 1; i < funnelLessons.length; i++) {
-    const drop = funnelLessons[i - 1].completedCount - funnelLessons[i].completedCount;
+    const drop =
+      funnelLessons[i - 1].completedCount - funnelLessons[i].completedCount;
     if (drop > biggestDrop) {
       biggestDrop = drop;
       dropIndex = i;
@@ -480,7 +484,9 @@ export function getCourseQuizDistributions(
     .all();
 
   // Per-quiz accumulators, pre-seeded so quizzes with no attempts still appear.
-  const passingByQuiz = new Map(quizRows.map((q) => [q.quizId, q.passingScore]));
+  const passingByQuiz = new Map(
+    quizRows.map((q) => [q.quizId, q.passingScore])
+  );
   const stats = new Map(
     quizRows.map((q) => [
       q.quizId,
@@ -580,7 +586,9 @@ function getInstructorCourseIds(instructorId: number): number[] {
  * the instructor authored; a user with no courses gets all-zero totals and an
  * empty `courses` array so the caller can show a friendly empty state.
  */
-export function getPortfolioAnalytics(instructorId: number): PortfolioAnalytics {
+export function getPortfolioAnalytics(
+  instructorId: number
+): PortfolioAnalytics {
   const courseRows = db
     .select({ id: courses.id, title: courses.title })
     .from(courses)
@@ -707,4 +715,69 @@ export function getPortfolioAnalytics(instructorId: number): PortfolioAnalytics 
  */
 export function getPortfolioTrends(instructorId: number): CourseTrends {
   return buildWeeklyTrends(getInstructorCourseIds(instructorId), new Date());
+}
+
+// ─── Platform-wide admin analytics ───
+// Cross-instructor aggregates for the admin dashboard (all courses, all
+// instructors). Time-period-aware: the caller picks 7d, 30d, 12m, or all, and
+// only purchases/enrollments in that window are counted. Every query is
+// set-based — no per-course or per-instructor loop.
+
+export type TimePeriod = "7d" | "30d" | "12m" | "all";
+
+export type PlatformAnalytics = {
+  totalRevenue: number;
+  totalEnrollments: number;
+  topCourse: { title: string; revenue: number } | null;
+};
+
+function timePeriodCutoff(period: TimePeriod, now: Date): string | null {
+  if (period === "all") return null;
+  const ms = now.getTime();
+  switch (period) {
+    case "7d":
+      return new Date(ms - 7 * 24 * 60 * 60 * 1000).toISOString();
+    case "30d":
+      return new Date(ms - 30 * 24 * 60 * 60 * 1000).toISOString();
+    case "12m":
+      return new Date(ms - 365 * 24 * 60 * 60 * 1000).toISOString();
+  }
+}
+
+export function getPlatformAnalytics(period: TimePeriod): PlatformAnalytics {
+  const now = new Date();
+  const cutoff = timePeriodCutoff(period, now);
+
+  const revenueRow = db
+    .select({ total: sql<number>`coalesce(sum(${purchases.pricePaid}), 0)` })
+    .from(purchases)
+    .where(cutoff ? gte(purchases.createdAt, cutoff) : undefined)
+    .get();
+  const totalRevenue = revenueRow?.total ?? 0;
+
+  const enrollmentRow = db
+    .select({ total: sql<number>`count(*)` })
+    .from(enrollments)
+    .where(cutoff ? gte(enrollments.enrolledAt, cutoff) : undefined)
+    .get();
+  const totalEnrollments = enrollmentRow?.total ?? 0;
+
+  const topRow = db
+    .select({
+      title: courses.title,
+      revenue: sql<number>`coalesce(sum(${purchases.pricePaid}), 0)`,
+    })
+    .from(purchases)
+    .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .where(cutoff ? gte(purchases.createdAt, cutoff) : undefined)
+    .groupBy(purchases.courseId)
+    .orderBy(desc(sql`coalesce(sum(${purchases.pricePaid}), 0)`))
+    .limit(1)
+    .get();
+
+  return {
+    totalRevenue,
+    totalEnrollments,
+    topCourse: topRow ? { title: topRow.title, revenue: topRow.revenue } : null,
+  };
 }

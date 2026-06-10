@@ -24,12 +24,24 @@ Run autonomously through all four steps, but **pause and ask when uncertain** (s
 ### 2. Implement
 
 - Follow the plan and the repo's conventions in `AGENTS.md` / `docs/`.
-- **Load the skills that match what you're touching** (e.g. `naming-conventions`, `function-parameters`, `service-testing`). New/edited service files need tests.
+- **Load the skills that match what you're touching** (e.g. `naming-conventions`, `function-parameters`, `service-testing`).
 - Respect the layering: Routes → Services → Database. Keep business logic out of routes.
+
+**Backend code (services, business logic, data layer) — build it test-first with a red-green-refactor loop, one slice at a time:**
+
+1. **Red** — Write a _single_ failing test for the smallest vertical slice of behavior. Run just that test and confirm it fails (for the right reason, not a typo):
+   ```bash
+   pnpm vitest run app/services/<file>.test.ts -t "<test name>"
+   ```
+2. **Green** — Write the _minimum_ code to make that test pass. Rerun the test; confirm it's green.
+3. **Refactor** — Clean up duplication and names while the test stays green. Rerun to confirm.
+4. **Repeat** for the next slice of behavior until the feature is complete.
+
+**Frontend code (route UI, components) — implement directly** from the plan; the red-green-refactor loop is for backend only.
 
 ### 3. Feedback loop (drive it green)
 
-Run both checks and fix what they surface:
+Once the slices are done, run both full checks and fix what they surface:
 
 ```bash
 pnpm typecheck   # react-router typegen && tsc — run after any route/loader change

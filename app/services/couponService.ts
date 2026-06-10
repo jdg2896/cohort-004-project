@@ -1,6 +1,16 @@
 import { eq, and, isNull } from "drizzle-orm";
 import { db } from "~/db";
-import { coupons, purchases, enrollments } from "~/db/schema";
+import {
+  coupons,
+  purchases,
+  enrollments,
+  users,
+  courses,
+  teamMembers,
+  NotificationType,
+  TeamMemberRole,
+} from "~/db/schema";
+import { createNotification } from "./notificationService";
 import crypto from "crypto";
 
 // ─── Coupon Service ───
@@ -115,5 +125,57 @@ export function redeemCoupon(
     .returning()
     .get();
 
+  // Side effect: let the team's admins know a seat was claimed. Best-effort — a
+  // missing user or course is skipped rather than failing the redemption.
+  notifyTeamAdminsOfRedemption(coupon, userId);
+
   return { ok: true, enrollment };
+}
+
+// Notifies every admin of the coupon's team that a seat was claimed. The seat
+// counts are a snapshot taken after the coupon is marked redeemed, so the
+// just-redeemed seat is already excluded from the remaining count.
+function notifyTeamAdminsOfRedemption(
+  coupon: typeof coupons.$inferSelect,
+  redeemerId: number
+) {
+  const redeemer = db
+    .select({ name: users.name })
+    .from(users)
+    .where(eq(users.id, redeemerId))
+    .get();
+  const course = db
+    .select({ title: courses.title })
+    .from(courses)
+    .where(eq(courses.id, coupon.courseId))
+    .get();
+
+  if (!redeemer || !course) return;
+
+  const courseCoupons = getCouponsForTeam(coupon.teamId, coupon.courseId);
+  const totalSeats = courseCoupons.length;
+  const remainingSeats = courseCoupons.filter(
+    (c) => c.redeemedByUserId === null
+  ).length;
+
+  const admins = db
+    .select({ userId: teamMembers.userId })
+    .from(teamMembers)
+    .where(
+      and(
+        eq(teamMembers.teamId, coupon.teamId),
+        eq(teamMembers.role, TeamMemberRole.Admin)
+      )
+    )
+    .all();
+
+  for (const admin of admins) {
+    createNotification({
+      recipientUserId: admin.userId,
+      type: NotificationType.CouponRedemption,
+      title: "Seat Claimed",
+      message: `${redeemer.name} redeemed a coupon for ${course.title} (${remainingSeats} of ${totalSeats} seats remaining)`,
+      linkUrl: "/team",
+    });
+  }
 }

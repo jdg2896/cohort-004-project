@@ -54,18 +54,21 @@ export async function loader({ request }: Route.LoaderArgs) {
       })
     : [];
 
-  // Notifications are an instructor-only feature, so only fetch them for instructors.
+  // Notifications are shown to instructors (enrollments) and team admins (coupon
+  // redemptions), so fetch them for either role.
   const isInstructor = currentUser?.role === UserRole.Instructor;
-  const notifications = isInstructor
-    ? getNotifications({
-        userId: currentUser.id,
-        limit: NOTIFICATION_PREVIEW_LIMIT,
-        offset: 0,
-      })
-    : [];
-  const unreadNotificationCount = isInstructor
-    ? getUnreadCount(currentUser.id)
-    : 0;
+  const userIsTeamAdmin = currentUserId ? isTeamAdmin(currentUserId) : false;
+  const showNotifications = isInstructor || userIsTeamAdmin;
+  const notifications =
+    showNotifications && currentUser
+      ? getNotifications({
+          userId: currentUser.id,
+          limit: NOTIFICATION_PREVIEW_LIMIT,
+          offset: 0,
+        })
+      : [];
+  const unreadNotificationCount =
+    showNotifications && currentUser ? getUnreadCount(currentUser.id) : 0;
 
   return {
     users: users.map((u) => ({ id: u.id, name: u.name, role: u.role })),
@@ -90,7 +93,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     devCountry,
     countryTierInfo,
     countries: COUNTRIES,
-    isTeamAdmin: currentUserId ? isTeamAdmin(currentUserId) : false,
+    isTeamAdmin: userIsTeamAdmin,
   };
 }
 

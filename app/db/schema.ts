@@ -45,9 +45,10 @@ export enum CommentModerationAction {
 
 // In-app notification kinds. Intentionally open-ended: the notifications table is
 // generic (title/message/linkUrl) so new types can be added here without a schema
-// change. Only "enrollment" is produced today.
+// change.
 export enum NotificationType {
   Enrollment = "enrollment",
+  CouponRedemption = "coupon_redemption",
 }
 
 // ─── Tables ───

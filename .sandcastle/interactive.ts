@@ -5,4 +5,5 @@ await interactive({
   agent: claudeCode("claude-opus-4-8"),
   sandbox: noSandbox(),
   promptFile: "./.sandcastle/prompt.md",
+  branchStrategy: { type: "branch", branch: "personal-run-through" },
 });

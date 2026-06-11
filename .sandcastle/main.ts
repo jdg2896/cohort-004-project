@@ -7,4 +7,5 @@ await run({
   promptFile: "./.sandcastle/prompt.md",
   maxIterations: 3,
   completionSignal: "<promise>NO MORE TASKS</promise>",
+  branchStrategy: { type: "branch", branch: "personal-run-through" },
 });

@@ -2,7 +2,7 @@
 
 Here are a set of GitHub issues:
 
-!`gh issue list --state open --json number,title,body,comments`
+!`gh issue list --repo jdg2896/cohort-004-project --state open --json number,title,body,comments`
 
 If all tasks are complete, output <promise>NO MORE TASKS</promise>.
 
@@ -49,9 +49,9 @@ Make a git commit. The commit message must:
 
 # THE ISSUE
 
-If the task is complete, close the original GitHub issue.
+If the task is complete, close the original GitHub issue using `gh issue close --repo jdg2896/cohort-004-project <number>`.
 
-If the task is not complete, leave a comment on the GitHub issue with what was done.
+If the task is not complete, leave a comment on the GitHub issue using `gh issue comment --repo jdg2896/cohort-004-project <number>`.
 
 # FINAL RULES
 

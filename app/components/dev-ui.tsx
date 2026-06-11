@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Form, useLocation } from "react-router";
 import { Button } from "~/components/ui/button";
 import { cn } from "~/lib/utils";
@@ -50,6 +50,15 @@ export function DevUI({
   const [minimized, setMinimized] = useState(false);
   const [open, setOpen] = useState(false);
   const location = useLocation();
+
+  // Close the dropdown once a switch completes and the loader re-runs with a
+  // new current user. Closing it in the submit button's onClick instead would
+  // unmount the <Form> synchronously (React flushes discrete-event updates
+  // before the browser's implicit submit fires), cancelling the switch.
+  useEffect(() => {
+    setOpen(false);
+  }, [currentUser?.id]);
+
   if (minimized) {
     return (
       <div className="fixed bottom-4 right-4 z-50">
@@ -123,7 +132,6 @@ export function DevUI({
                   <input type="hidden" name="userId" value={user.id} />
                   <button
                     type="submit"
-                    onClick={() => setOpen(false)}
                     className={cn(
                       "flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent",
                       currentUser?.id === user.id && "bg-accent"

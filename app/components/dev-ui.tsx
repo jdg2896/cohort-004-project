@@ -40,7 +40,13 @@ function RoleBadge({ role }: { role: string }) {
   );
 }
 
-export function DevUI({ users, currentUser, devCountry, countryTierInfo, countries }: DevUIProps) {
+export function DevUI({
+  users,
+  currentUser,
+  devCountry,
+  countryTierInfo,
+  countries,
+}: DevUIProps) {
   const [minimized, setMinimized] = useState(false);
   const [open, setOpen] = useState(false);
   const location = useLocation();
@@ -117,6 +123,7 @@ export function DevUI({ users, currentUser, devCountry, countryTierInfo, countri
                   <input type="hidden" name="userId" value={user.id} />
                   <button
                     type="submit"
+                    onClick={() => setOpen(false)}
                     className={cn(
                       "flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent",
                       currentUser?.id === user.id && "bg-accent"

@@ -28,9 +28,14 @@ import {
 import {
   getLessonProgress,
   getLessonProgressForCourse,
+  isLessonCompleted,
   markLessonComplete,
   markLessonInProgress,
 } from "~/services/progressService";
+import {
+  getModuleCompletionToast,
+  type ModuleCompletionToast,
+} from "~/services/moduleCompletionService";
 import {
   getLastWatchPosition,
   calculateWatchProgress,
@@ -540,10 +545,14 @@ export async function action({ params, request }: Route.ActionArgs) {
         { status: 404 }
       );
     }
+    // Capture prior completion state before writing, so re-completing a lesson
+    // (already complete) doesn't re-fire the module-completion toast below.
+    const wasAlreadyComplete = isLessonCompleted(currentUserId, lessonId);
     markLessonComplete(currentUserId, lessonId);
     // Award lesson-completion XP, but only for students — gamification is
     // student-only, and instructors/admins viewing lessons shouldn't accrue XP.
     // awardXp is idempotent per (user, source), so re-completing never duplicates.
+    let moduleCompletion: ModuleCompletionToast | null = null;
     if (currentUser?.role === UserRole.Student) {
       awardXp({
         userId: currentUserId,
@@ -554,6 +563,13 @@ export async function action({ params, request }: Route.ActionArgs) {
       // Record today's UTC streak activity. Idempotent per UTC day, so multiple
       // completions in a day count once and re-completing never inflates it.
       recordStreakActivity({ userId: currentUserId });
+      // If this completion finished the module, signal the client to toast the
+      // module's total XP. Null for a non-final lesson or a re-completion.
+      moduleCompletion = getModuleCompletionToast({
+        userId: currentUserId,
+        lessonId,
+        wasAlreadyComplete,
+      });
     }
     // Finishing the final lesson promotes the enrollment to "complete" (set-once).
     // No-op for the instructor/admin viewers above who have no enrollment.
@@ -561,7 +577,7 @@ export async function action({ params, request }: Route.ActionArgs) {
       userId: currentUserId,
       courseId: course.id,
     });
-    return { success: true };
+    return { success: true, moduleCompletion };
   }
 
   if (intent === "toggle-bookmark") {
@@ -835,6 +851,17 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
 
   const isCompleted =
     lessonStatus === LessonProgressStatus.Completed || justCompleted;
+
+  // Celebrate finishing a module with a single toast showing its total XP. Fires
+  // only when the completed lesson was the module's last — non-final lessons and
+  // re-completions return no payload from the action. Sonner lives in the app
+  // layout, so the toast survives the navigation to the next lesson below.
+  const moduleCompletion = fetcher.data?.moduleCompletion;
+  useEffect(() => {
+    if (moduleCompletion) {
+      toast.success(`Module complete! +${moduleCompletion.xpEarned} XP earned`);
+    }
+  }, [moduleCompletion]);
 
   // Navigate to next lesson after marking complete
   useEffect(() => {

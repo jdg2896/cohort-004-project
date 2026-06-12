@@ -15,6 +15,7 @@ vi.mock("~/db", () => ({
 // Import after mock so the module picks up our test db
 import {
   awardXp,
+  awardQuizFirstPassXp,
   getTotalXp,
   getGamificationStats,
   hasXpEvent,
@@ -118,6 +119,71 @@ describe("gamificationService", () => {
 
       expect(getTotalXp(base.user.id)).toBe(10);
       expect(getTotalXp(other.id)).toBe(0);
+    });
+  });
+
+  describe("awardQuizFirstPassXp", () => {
+    it("awards exactly 5 XP on the first pass", () => {
+      const awarded = awardQuizFirstPassXp({
+        userId: base.user.id,
+        quizId: 1,
+        passed: true,
+      });
+
+      expect(awarded).toBe(true);
+      expect(getTotalXp(base.user.id)).toBe(QUIZ_FIRST_PASS_XP);
+    });
+
+    it("does not award again on a second pass of the same quiz", () => {
+      expect(
+        awardQuizFirstPassXp({ userId: base.user.id, quizId: 1, passed: true })
+      ).toBe(true);
+      expect(
+        awardQuizFirstPassXp({ userId: base.user.id, quizId: 1, passed: true })
+      ).toBe(false);
+
+      expect(getTotalXp(base.user.id)).toBe(QUIZ_FIRST_PASS_XP);
+    });
+
+    it("awards nothing for a failing attempt", () => {
+      const awarded = awardQuizFirstPassXp({
+        userId: base.user.id,
+        quizId: 1,
+        passed: false,
+      });
+
+      expect(awarded).toBe(false);
+      expect(getTotalXp(base.user.id)).toBe(0);
+      expect(
+        hasXpEvent({
+          userId: base.user.id,
+          sourceType: XpSourceType.QuizFirstPass,
+          sourceId: 1,
+        })
+      ).toBe(false);
+    });
+
+    it("awards once when a student fails first, then passes later", () => {
+      // Fail does not reserve the award...
+      expect(
+        awardQuizFirstPassXp({ userId: base.user.id, quizId: 1, passed: false })
+      ).toBe(false);
+      // ...so the later pass still grants the 5 XP exactly once.
+      expect(
+        awardQuizFirstPassXp({ userId: base.user.id, quizId: 1, passed: true })
+      ).toBe(true);
+      expect(
+        awardQuizFirstPassXp({ userId: base.user.id, quizId: 1, passed: true })
+      ).toBe(false);
+
+      expect(getTotalXp(base.user.id)).toBe(QUIZ_FIRST_PASS_XP);
+    });
+
+    it("tracks first-pass XP per quiz independently", () => {
+      awardQuizFirstPassXp({ userId: base.user.id, quizId: 1, passed: true });
+      awardQuizFirstPassXp({ userId: base.user.id, quizId: 2, passed: true });
+
+      expect(getTotalXp(base.user.id)).toBe(QUIZ_FIRST_PASS_XP * 2);
     });
   });
 

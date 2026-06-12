@@ -42,6 +42,26 @@ export function awardXp(opts: AwardXpOptions): boolean {
   return inserted !== undefined;
 }
 
+// Awards the one-time quiz XP on a student's first *passing* attempt. Failing
+// attempts award nothing (and don't reserve the award), so a student who fails
+// then later passes still earns the XP exactly once. The first pass inserts;
+// every subsequent pass is a no-op via awardXp's unique-index dedup, keyed on
+// (userId, QuizFirstPass, quizId). Returns true only when a new award was made.
+export function awardQuizFirstPassXp(opts: {
+  userId: number;
+  quizId: number;
+  passed: boolean;
+}): boolean {
+  if (!opts.passed) return false;
+
+  return awardXp({
+    userId: opts.userId,
+    amount: QUIZ_FIRST_PASS_XP,
+    sourceType: XpSourceType.QuizFirstPass,
+    sourceId: opts.quizId,
+  });
+}
+
 // Total XP a student has earned, summed across every source and every course
 // (XP is global). Returns 0 for a student with no events.
 export function getTotalXp(userId: number): number {

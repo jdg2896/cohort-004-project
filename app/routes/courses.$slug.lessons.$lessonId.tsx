@@ -46,7 +46,11 @@ import {
   toggleBookmark,
 } from "~/services/bookmarkService";
 import { computeResult } from "~/services/quizScoringService";
-import { awardXp, LESSON_COMPLETION_XP } from "~/services/gamificationService";
+import {
+  awardXp,
+  awardQuizFirstPassXp,
+  LESSON_COMPLETION_XP,
+} from "~/services/gamificationService";
 import { LessonProgressStatus, UserRole, XpSourceType } from "~/db/schema";
 import { Button } from "~/components/ui/button";
 import { Textarea } from "~/components/ui/textarea";
@@ -601,6 +605,17 @@ export async function action({ params, request }: Route.ActionArgs) {
     const result = computeResult(currentUserId, quizId, selectedAnswers);
     if (!result) {
       throw data("Failed to score quiz", { status: 500 });
+    }
+
+    // Award the first-pass quiz XP, students only (gamification is student-only).
+    // The service no-ops on a failing attempt and dedupes repeat passes, so this
+    // is safe to call on every submission — only the first *pass* grants 5 XP.
+    if (currentUser?.role === UserRole.Student) {
+      awardQuizFirstPassXp({
+        userId: currentUserId,
+        quizId,
+        passed: result.passed,
+      });
     }
 
     return { quizResult: result };

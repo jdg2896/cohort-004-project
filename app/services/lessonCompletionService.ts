@@ -77,37 +77,47 @@ export function completeLesson(opts: {
 
   const user = getUserById(userId);
 
-  // Capture prior completion state before writing, so re-completing a lesson
-  // (already complete) doesn't re-fire the module-completion toast below.
-  const wasAlreadyComplete = isLessonCompleted(userId, lessonId);
-  markLessonComplete(userId, lessonId);
+  // Run the whole write cascade in one transaction so a mid-cascade failure
+  // rolls back every prior write instead of stranding partial state (e.g. XP
+  // awarded but the enrollment never stamped). better-sqlite3 is synchronous
+  // and single-connection, so the inner services' module-level `db` calls
+  // execute inside this BEGIN/COMMIT and participate automatically.
+  const moduleCompletion = db.transaction(() => {
+    // Capture prior completion state before writing, so re-completing a lesson
+    // (already complete) doesn't re-fire the module-completion toast below.
+    const wasAlreadyComplete = isLessonCompleted(userId, lessonId);
+    markLessonComplete(userId, lessonId);
 
-  // Award lesson-completion XP, but only for students — gamification is
-  // student-only, and instructors/admins viewing lessons shouldn't accrue XP.
-  // awardXp is idempotent per (user, source), so re-completing never duplicates.
-  let moduleCompletion: ModuleCompletionToast | null = null;
-  if (user?.role === UserRole.Student) {
-    awardXp({
-      userId,
-      amount: LESSON_COMPLETION_XP,
-      sourceType: XpSourceType.LessonCompletion,
-      sourceId: lessonId,
-    });
-    // Record today's UTC streak activity. Idempotent per UTC day, so multiple
-    // completions in a day count once and re-completing never inflates it.
-    recordStreakActivity({ userId });
-    // If this completion finished the module, signal the client to toast the
-    // module's total XP. Null for a non-final lesson or a re-completion.
-    moduleCompletion = getModuleCompletionToast({
-      userId,
-      lessonId,
-      wasAlreadyComplete,
-    });
-  }
+    // Award lesson-completion XP, but only for students — gamification is
+    // student-only, and instructors/admins viewing lessons shouldn't accrue XP.
+    // awardXp is idempotent per (user, source), so re-completing never dups.
+    let toast: ModuleCompletionToast | null = null;
+    if (user?.role === UserRole.Student) {
+      awardXp({
+        userId,
+        amount: LESSON_COMPLETION_XP,
+        sourceType: XpSourceType.LessonCompletion,
+        sourceId: lessonId,
+      });
+      // Record today's UTC streak activity. Idempotent per UTC day, so multiple
+      // completions in a day count once and re-completing never inflates it.
+      recordStreakActivity({ userId });
+      // If this completion finished the module, signal the client to toast the
+      // module's total XP. Null for a non-final lesson or a re-completion.
+      toast = getModuleCompletionToast({
+        userId,
+        lessonId,
+        wasAlreadyComplete,
+      });
+    }
 
-  // Finishing the final lesson promotes the enrollment to "complete" (set-once).
-  // No-op for the instructor/admin viewers above who have no enrollment.
-  markEnrollmentCompleteIfFinished({ userId, courseId });
+    // Finishing the final lesson promotes the enrollment to "complete"
+    // (set-once). No-op for the instructor/admin viewers above with no
+    // enrollment.
+    markEnrollmentCompleteIfFinished({ userId, courseId });
+
+    return toast;
+  });
 
   return { ok: true, moduleCompletion };
 }

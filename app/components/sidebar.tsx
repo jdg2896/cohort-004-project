@@ -14,6 +14,7 @@ import {
   GraduationCap,
   Shield,
   ShieldCheck,
+  Sparkles,
   Tag,
   Users,
   UsersRound,
@@ -40,11 +41,22 @@ interface RecentCourse {
   progress: number;
 }
 
+// Mirrors GamificationStats from the gamification service. Null for non-students,
+// who see no gamification UI.
+interface GamificationStats {
+  totalXp: number;
+  level: number;
+  xpIntoLevel: number;
+  xpForLevel: number;
+  progress: number;
+}
+
 interface SidebarProps {
   currentUser: CurrentUser | null;
   recentCourses?: RecentCourse[];
   notifications?: NotificationItem[];
   unreadNotificationCount?: number;
+  gamificationStats?: GamificationStats | null;
   isTeamAdmin?: boolean;
 }
 
@@ -123,6 +135,7 @@ export function Sidebar({
   recentCourses = [],
   notifications = [],
   unreadNotificationCount = 0,
+  gamificationStats = null,
   isTeamAdmin = false,
 }: SidebarProps) {
   const currentUserRole = currentUser?.role ?? null;
@@ -194,6 +207,34 @@ export function Sidebar({
           </NavLink>
         )}
       </nav>
+
+      {gamificationStats && (
+        <div className="border-t border-sidebar-border p-3">
+          <div className="flex items-center justify-between px-3">
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              <Sparkles className="size-4 text-primary" />
+              Level {gamificationStats.level}
+            </div>
+            <span className="text-xs text-sidebar-foreground/50">
+              {gamificationStats.totalXp} XP
+            </span>
+          </div>
+          <div className="mt-2 px-3">
+            <div className="h-1.5 w-full rounded-full bg-sidebar-accent">
+              <div
+                className="h-1.5 rounded-full bg-primary transition-all"
+                style={{
+                  width: `${Math.round(gamificationStats.progress * 100)}%`,
+                }}
+              />
+            </div>
+            <div className="mt-1 text-right text-xs text-sidebar-foreground/50">
+              {gamificationStats.xpIntoLevel} / {gamificationStats.xpForLevel}{" "}
+              XP
+            </div>
+          </div>
+        </div>
+      )}
 
       {recentCourses.length > 0 && (
         <div className="border-t border-sidebar-border p-3">

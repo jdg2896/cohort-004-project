@@ -46,7 +46,8 @@ import {
   toggleBookmark,
 } from "~/services/bookmarkService";
 import { computeResult } from "~/services/quizScoringService";
-import { LessonProgressStatus, UserRole } from "~/db/schema";
+import { awardXp, LESSON_COMPLETION_XP } from "~/services/gamificationService";
+import { LessonProgressStatus, UserRole, XpSourceType } from "~/db/schema";
 import { Button } from "~/components/ui/button";
 import { Textarea } from "~/components/ui/textarea";
 import { Card, CardContent } from "~/components/ui/card";
@@ -292,8 +293,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   const isAdmin = currentUser?.role === UserRole.Admin;
   const isCourseInstructor =
     !!currentUserId && course.instructorId === currentUserId;
-  const enrolled =
-    !!currentUserId && isUserEnrolled(currentUserId, course.id);
+  const enrolled = !!currentUserId && isUserEnrolled(currentUserId, course.id);
 
   if (!enrolled && !isAdmin && !isCourseInstructor) {
     throw redirect(`/courses/${slug}`);
@@ -536,9 +536,23 @@ export async function action({ params, request }: Route.ActionArgs) {
       );
     }
     markLessonComplete(currentUserId, lessonId);
+    // Award lesson-completion XP, but only for students — gamification is
+    // student-only, and instructors/admins viewing lessons shouldn't accrue XP.
+    // awardXp is idempotent per (user, source), so re-completing never duplicates.
+    if (currentUser?.role === UserRole.Student) {
+      awardXp({
+        userId: currentUserId,
+        amount: LESSON_COMPLETION_XP,
+        sourceType: XpSourceType.LessonCompletion,
+        sourceId: lessonId,
+      });
+    }
     // Finishing the final lesson promotes the enrollment to "complete" (set-once).
     // No-op for the instructor/admin viewers above who have no enrollment.
-    markEnrollmentCompleteIfFinished({ userId: currentUserId, courseId: course.id });
+    markEnrollmentCompleteIfFinished({
+      userId: currentUserId,
+      courseId: course.id,
+    });
     return { success: true };
   }
 
@@ -654,7 +668,9 @@ export async function action({ params, request }: Route.ActionArgs) {
         return data(
           {
             error:
-              error instanceof Error ? error.message : "Failed to edit comment.",
+              error instanceof Error
+                ? error.message
+                : "Failed to edit comment.",
           },
           { status: 400 }
         );
@@ -1836,9 +1852,7 @@ function DiscussionSection({
             onClick={loadMore}
             disabled={loadFetcher.state !== "idle"}
           >
-            {loadFetcher.state !== "idle"
-              ? "Loading…"
-              : "Load more comments"}
+            {loadFetcher.state !== "idle" ? "Loading…" : "Load more comments"}
           </Button>
         </div>
       )}

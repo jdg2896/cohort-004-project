@@ -51,6 +51,14 @@ export enum NotificationType {
   CouponRedemption = "coupon_redemption",
 }
 
+// What earned a student an XP award. The (userId, sourceType, sourceId) triple is
+// unique, which is how the award path stays idempotent: completing the same lesson
+// (or passing the same quiz) twice can't insert a second event.
+export enum XpSourceType {
+  LessonCompletion = "lesson_completion",
+  QuizFirstPass = "quiz_first_pass",
+}
+
 // ─── Tables ───
 
 export const users = sqliteTable("users", {
@@ -363,6 +371,27 @@ export const notifications = sqliteTable("notifications", {
     .notNull()
     .$defaultFn(() => new Date().toISOString()),
 });
+
+// Append-only log of every XP award, the single source of truth for a student's
+// total XP (level is derived, never stored). sourceType + sourceId identify what
+// earned the award; the unique index on (userId, sourceType, sourceId) makes the
+// award path idempotent so re-completing a lesson or re-passing a quiz is a no-op.
+export const xpEvents = sqliteTable(
+  "xp_events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id),
+    amount: integer("amount").notNull(),
+    sourceType: text("source_type").notNull().$type<XpSourceType>(),
+    sourceId: integer("source_id").notNull(),
+    createdAt: text("created_at")
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (table) => [unique().on(table.userId, table.sourceType, table.sourceId)]
+);
 
 // Append-only audit trail for moderator deletions of other users' comments.
 // commentId is intentionally NOT a foreign key so the audit row survives a hard

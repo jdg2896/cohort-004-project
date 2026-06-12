@@ -17,6 +17,7 @@ import {
   getNotifications,
   getUnreadCount,
 } from "~/services/notificationService";
+import { getGamificationStats } from "~/services/gamificationService";
 import { UserRole } from "~/db/schema";
 
 // How many recent notifications the bell dropdown shows.
@@ -70,6 +71,13 @@ export async function loader({ request }: Route.LoaderArgs) {
   const unreadNotificationCount =
     showNotifications && currentUser ? getUnreadCount(currentUser.id) : 0;
 
+  // Gamification (XP/level) is student-only. Other roles get no stats so the
+  // sidebar section stays hidden for them.
+  const gamificationStats =
+    currentUser?.role === UserRole.Student
+      ? getGamificationStats(currentUser.id)
+      : null;
+
   return {
     users: users.map((u) => ({ id: u.id, name: u.name, role: u.role })),
     currentUser: currentUser
@@ -90,6 +98,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       createdAt: n.createdAt,
     })),
     unreadNotificationCount,
+    gamificationStats,
     devCountry,
     countryTierInfo,
     countries: COUNTRIES,
@@ -104,6 +113,7 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
     recentCourses,
     notifications,
     unreadNotificationCount,
+    gamificationStats,
     devCountry,
     countryTierInfo,
     countries,
@@ -117,6 +127,7 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
         recentCourses={recentCourses}
         notifications={notifications}
         unreadNotificationCount={unreadNotificationCount}
+        gamificationStats={gamificationStats}
         isTeamAdmin={userIsTeamAdmin}
       />
       <main className="flex-1 overflow-y-auto">

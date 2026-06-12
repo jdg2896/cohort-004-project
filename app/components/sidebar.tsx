@@ -10,6 +10,7 @@ import {
 import {
   BarChart3,
   BookOpen,
+  Flame,
   LayoutDashboard,
   GraduationCap,
   Shield,
@@ -51,12 +52,20 @@ interface GamificationStats {
   progress: number;
 }
 
+// Mirrors StreakStats from the streak service. Null for non-students, who see no
+// gamification UI.
+interface StreakStats {
+  currentStreak: number;
+  longestStreak: number;
+}
+
 interface SidebarProps {
   currentUser: CurrentUser | null;
   recentCourses?: RecentCourse[];
   notifications?: NotificationItem[];
   unreadNotificationCount?: number;
   gamificationStats?: GamificationStats | null;
+  streakStats?: StreakStats | null;
   isTeamAdmin?: boolean;
 }
 
@@ -136,6 +145,7 @@ export function Sidebar({
   notifications = [],
   unreadNotificationCount = 0,
   gamificationStats = null,
+  streakStats = null,
   isTeamAdmin = false,
 }: SidebarProps) {
   const currentUserRole = currentUser?.role ?? null;
@@ -232,6 +242,21 @@ export function Sidebar({
               {gamificationStats.xpIntoLevel} / {gamificationStats.xpForLevel}{" "}
               XP
             </div>
+          </div>
+        </div>
+      )}
+
+      {streakStats && (
+        <div className="border-t border-sidebar-border p-3">
+          <div className="flex items-center justify-between px-3">
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              <Flame className="size-4 text-orange-500" />
+              {streakStats.currentStreak} day
+              {streakStats.currentStreak === 1 ? "" : "s"}
+            </div>
+            <span className="text-xs text-sidebar-foreground/50">
+              Best {streakStats.longestStreak}
+            </span>
           </div>
         </div>
       )}

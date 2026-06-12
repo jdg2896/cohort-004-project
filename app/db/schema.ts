@@ -393,6 +393,42 @@ export const xpEvents = sqliteTable(
   (table) => [unique().on(table.userId, table.sourceType, table.sourceId)]
 );
 
+// One row per user per UTC day on which they completed at least one lesson — the
+// audit log behind a student's streak. activityDate is the UTC calendar day
+// (YYYY-MM-DD); the unique index makes recording idempotent so multiple
+// completions in a single UTC day count as one streak day.
+export const streakActivities = sqliteTable(
+  "streak_activities",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id),
+    activityDate: text("activity_date").notNull(),
+    createdAt: text("created_at")
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (table) => [unique().on(table.userId, table.activityDate)]
+);
+
+// Denormalized current/longest streak per student, updated on each lesson
+// completion so reads don't rescan streak_activities. lastActivityDate is the UTC
+// day the current streak last advanced; a read can detect a lapsed streak by
+// comparing it to today without recomputing from the log. longestStreak is a
+// high-water mark and is never decreased by a reset.
+export const streakStats = sqliteTable("streak_stats", {
+  userId: integer("user_id")
+    .primaryKey()
+    .references(() => users.id),
+  currentStreak: integer("current_streak").notNull().default(0),
+  longestStreak: integer("longest_streak").notNull().default(0),
+  lastActivityDate: text("last_activity_date"),
+  updatedAt: text("updated_at")
+    .notNull()
+    .$defaultFn(() => new Date().toISOString()),
+});
+
 // Append-only audit trail for moderator deletions of other users' comments.
 // commentId is intentionally NOT a foreign key so the audit row survives a hard
 // delete of the underlying comment.

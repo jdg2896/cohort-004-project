@@ -51,6 +51,7 @@ import {
   awardQuizFirstPassXp,
   LESSON_COMPLETION_XP,
 } from "~/services/gamificationService";
+import { recordStreakActivity } from "~/services/streakService";
 import { LessonProgressStatus, UserRole, XpSourceType } from "~/db/schema";
 import { Button } from "~/components/ui/button";
 import { Textarea } from "~/components/ui/textarea";
@@ -550,6 +551,9 @@ export async function action({ params, request }: Route.ActionArgs) {
         sourceType: XpSourceType.LessonCompletion,
         sourceId: lessonId,
       });
+      // Record today's UTC streak activity. Idempotent per UTC day, so multiple
+      // completions in a day count once and re-completing never inflates it.
+      recordStreakActivity({ userId: currentUserId });
     }
     // Finishing the final lesson promotes the enrollment to "complete" (set-once).
     // No-op for the instructor/admin viewers above who have no enrollment.

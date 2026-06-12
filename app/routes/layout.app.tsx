@@ -18,6 +18,7 @@ import {
   getUnreadCount,
 } from "~/services/notificationService";
 import { getGamificationStats } from "~/services/gamificationService";
+import { getStreakStats } from "~/services/streakService";
 import { UserRole } from "~/db/schema";
 
 // How many recent notifications the bell dropdown shows.
@@ -77,6 +78,12 @@ export async function loader({ request }: Route.LoaderArgs) {
     currentUser?.role === UserRole.Student
       ? getGamificationStats(currentUser.id)
       : null;
+  // Streaks are student-only too. Always present for students (even at 0 days) so
+  // the sidebar keeps the streak section visible as a reminder.
+  const streakStats =
+    currentUser?.role === UserRole.Student
+      ? getStreakStats({ userId: currentUser.id })
+      : null;
 
   return {
     users: users.map((u) => ({ id: u.id, name: u.name, role: u.role })),
@@ -99,6 +106,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     })),
     unreadNotificationCount,
     gamificationStats,
+    streakStats,
     devCountry,
     countryTierInfo,
     countries: COUNTRIES,
@@ -114,6 +122,7 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
     notifications,
     unreadNotificationCount,
     gamificationStats,
+    streakStats,
     devCountry,
     countryTierInfo,
     countries,
@@ -128,6 +137,7 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
         notifications={notifications}
         unreadNotificationCount={unreadNotificationCount}
         gamificationStats={gamificationStats}
+        streakStats={streakStats}
         isTeamAdmin={userIsTeamAdmin}
       />
       <main className="flex-1 overflow-y-auto">

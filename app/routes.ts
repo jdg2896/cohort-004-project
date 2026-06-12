@@ -50,6 +50,8 @@ export default [
     route("settings", "routes/settings.tsx"),
     route("team", "routes/team.tsx"),
     route("redeem/:code", "routes/redeem.$code.tsx"),
+    // Throwaway dev-only prototype — see plans/live-presence-indicator-prototype.md
+    route("dev/presence-prototype", "routes/dev.presence-prototype.tsx"),
   ]),
   route("signup", "routes/signup.tsx"),
   route("login", "routes/login.tsx"),
@@ -58,6 +60,7 @@ export default [
   route("api/video-tracking", "routes/api.video-tracking.ts"),
   route("api/course-review", "routes/api.course-review.ts"),
   route("api/set-dev-country", "routes/api.set-dev-country.ts"),
+  route("api/ably-token", "routes/api.ably-token.ts"),
   route("api/notifications/mark-read", "routes/api.notifications.mark-read.ts"),
   route(
     "api/notifications/mark-all-read",

@@ -1,12 +1,34 @@
 import { Link } from "react-router";
 import type { Route } from "./+types/dashboard";
 import { getUserEnrolledCourses } from "~/services/enrollmentService";
-import { calculateProgress, getCompletedLessonCount, getTotalLessonCount, getNextIncompleteLesson } from "~/services/progressService";
+import {
+  calculateProgress,
+  getCompletedLessonCount,
+  getTotalLessonCount,
+  getNextIncompleteLesson,
+} from "~/services/progressService";
 import { getCurrentUserId } from "~/lib/session";
-import { Card, CardContent, CardFooter, CardHeader } from "~/components/ui/card";
+import { getUserById } from "~/services/userService";
+import { getGamificationStats } from "~/services/gamificationService";
+import { getStreakStats } from "~/services/streakService";
+import { UserRole } from "~/db/schema";
+import {
+  Card,
+  CardContent,
+  CardFooter,
+  CardHeader,
+} from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Skeleton } from "~/components/ui/skeleton";
-import { AlertTriangle, BookOpen, CheckCircle2, GraduationCap, PlayCircle } from "lucide-react";
+import {
+  AlertTriangle,
+  BookOpen,
+  CheckCircle2,
+  Flame,
+  GraduationCap,
+  PlayCircle,
+  Sparkles,
+} from "lucide-react";
 import { CourseImage } from "~/components/course-image";
 import { data, isRouteErrorResponse } from "react-router";
 
@@ -25,6 +47,18 @@ export async function loader({ request }: Route.LoaderArgs) {
       status: 401,
     });
   }
+
+  // Gamification (XP/level/streaks) is student-only and private to each student —
+  // mirror the sidebar's role gating so other roles see no stats card.
+  const currentUser = getUserById(currentUserId);
+  const gamificationStats =
+    currentUser?.role === UserRole.Student
+      ? getGamificationStats(currentUserId)
+      : null;
+  const streakStats =
+    currentUser?.role === UserRole.Student
+      ? getStreakStats({ userId: currentUserId })
+      : null;
 
   const enrolledCourses = getUserEnrolledCourses(currentUserId);
 
@@ -59,7 +93,75 @@ export async function loader({ request }: Route.LoaderArgs) {
   const completedCourses = coursesWithProgress.filter((c) => c.isCompleted);
   const inProgressCourses = coursesWithProgress.filter((c) => !c.isCompleted);
 
-  return { inProgressCourses, completedCourses };
+  return {
+    inProgressCourses,
+    completedCourses,
+    gamificationStats,
+    streakStats,
+  };
+}
+
+interface GamificationSummaryProps {
+  gamificationStats: {
+    totalXp: number;
+    level: number;
+    xpIntoLevel: number;
+    xpForLevel: number;
+    progress: number;
+  };
+  streakStats: { currentStreak: number; longestStreak: number };
+}
+
+// At-a-glance gamification overview for the dashboard. Reads the same services and
+// level utility as the sidebar, so the numbers always match. Rendered only for
+// students (the loader returns null stats otherwise).
+function GamificationSummaryCard({
+  gamificationStats,
+  streakStats,
+}: GamificationSummaryProps) {
+  return (
+    <Card>
+      <CardContent className="grid gap-6 sm:grid-cols-3">
+        {/* Level + XP progress */}
+        <div className="sm:col-span-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 font-semibold">
+              <Sparkles className="size-4 text-primary" />
+              Level {gamificationStats.level}
+            </div>
+            <span className="text-sm text-muted-foreground">
+              {gamificationStats.totalXp} XP
+            </span>
+          </div>
+          <div className="mt-3 h-2 overflow-hidden rounded-full bg-muted">
+            <div
+              className="h-full rounded-full bg-primary transition-all"
+              style={{
+                width: `${Math.round(gamificationStats.progress * 100)}%`,
+              }}
+            />
+          </div>
+          <div className="mt-1 text-right text-xs text-muted-foreground">
+            {gamificationStats.xpIntoLevel} / {gamificationStats.xpForLevel} XP
+            to Level {gamificationStats.level + 1}
+          </div>
+        </div>
+
+        {/* Streaks */}
+        <div className="flex flex-col justify-center gap-1 sm:border-l sm:pl-6">
+          <div className="flex items-center gap-2 font-semibold">
+            <Flame className="size-4 text-orange-500" />
+            {streakStats.currentStreak} day
+            {streakStats.currentStreak === 1 ? "" : "s"}
+          </div>
+          <span className="text-sm text-muted-foreground">
+            Best {streakStats.longestStreak} day
+            {streakStats.longestStreak === 1 ? "" : "s"}
+          </span>
+        </div>
+      </CardContent>
+    </Card>
+  );
 }
 
 function DashboardCardSkeleton() {
@@ -102,7 +204,12 @@ export function HydrateFallback() {
 }
 
 export default function Dashboard({ loaderData }: Route.ComponentProps) {
-  const { inProgressCourses, completedCourses } = loaderData;
+  const {
+    inProgressCourses,
+    completedCourses,
+    gamificationStats,
+    streakStats,
+  } = loaderData;
   const totalCourses = inProgressCourses.length + completedCourses.length;
 
   return (
@@ -123,6 +230,15 @@ export default function Dashboard({ loaderData }: Route.ComponentProps) {
         </p>
       </div>
 
+      {gamificationStats && streakStats && (
+        <div className="mb-8">
+          <GamificationSummaryCard
+            gamificationStats={gamificationStats}
+            streakStats={streakStats}
+          />
+        </div>
+      )}
+
       {totalCourses === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 text-center">
           <GraduationCap className="mb-4 size-12 text-muted-foreground/50" />
@@ -142,8 +258,14 @@ export default function Dashboard({ loaderData }: Route.ComponentProps) {
               <h2 className="mb-4 text-xl font-semibold">In Progress</h2>
               <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
                 {inProgressCourses.map((course) => (
-                  <Card key={course.enrollmentId} className="flex flex-col overflow-hidden pt-0">
-                    <Link to={`/courses/${course.courseSlug}`} className="aspect-video overflow-hidden">
+                  <Card
+                    key={course.enrollmentId}
+                    className="flex flex-col overflow-hidden pt-0"
+                  >
+                    <Link
+                      to={`/courses/${course.courseSlug}`}
+                      className="aspect-video overflow-hidden"
+                    >
                       <CourseImage
                         src={course.coverImageUrl}
                         alt={course.courseTitle}
@@ -211,8 +333,14 @@ export default function Dashboard({ loaderData }: Route.ComponentProps) {
               <h2 className="mb-4 text-xl font-semibold">Completed</h2>
               <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
                 {completedCourses.map((course) => (
-                  <Card key={course.enrollmentId} className="flex flex-col overflow-hidden pt-0">
-                    <Link to={`/courses/${course.courseSlug}`} className="relative aspect-video overflow-hidden">
+                  <Card
+                    key={course.enrollmentId}
+                    className="flex flex-col overflow-hidden pt-0"
+                  >
+                    <Link
+                      to={`/courses/${course.courseSlug}`}
+                      className="relative aspect-video overflow-hidden"
+                    >
                       <CourseImage
                         src={course.coverImageUrl}
                         alt={course.courseTitle}
@@ -236,9 +364,7 @@ export default function Dashboard({ loaderData }: Route.ComponentProps) {
                     <CardContent className="flex-1">
                       <div className="flex items-center gap-2 text-sm text-green-600">
                         <CheckCircle2 className="size-4" />
-                        <span>
-                          Completed — {course.totalLessons} lessons
-                        </span>
+                        <span>Completed — {course.totalLessons} lessons</span>
                       </div>
                     </CardContent>
                     <CardFooter>
@@ -270,7 +396,10 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   if (isRouteErrorResponse(error)) {
     if (error.status === 401) {
       title = "Sign in required";
-      message = typeof error.data === "string" ? error.data : "Please select a user from the DevUI panel.";
+      message =
+        typeof error.data === "string"
+          ? error.data
+          : "Please select a user from the DevUI panel.";
     } else {
       title = `Error ${error.status}`;
       message = typeof error.data === "string" ? error.data : error.statusText;

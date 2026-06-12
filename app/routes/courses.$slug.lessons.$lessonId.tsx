@@ -10,10 +10,8 @@ import { getLessonById } from "~/services/lessonService";
 import { getModuleById } from "~/services/moduleService";
 import { getCurrentUserId } from "~/lib/session";
 import { getUserById } from "~/services/userService";
-import {
-  isUserEnrolled,
-  markEnrollmentCompleteIfFinished,
-} from "~/services/enrollmentService";
+import { isUserEnrolled } from "~/services/enrollmentService";
+import { completeLesson } from "~/services/lessonCompletionService";
 import {
   countTopLevelComments,
   getCommentThreads,
@@ -28,14 +26,8 @@ import {
 import {
   getLessonProgress,
   getLessonProgressForCourse,
-  isLessonCompleted,
-  markLessonComplete,
   markLessonInProgress,
 } from "~/services/progressService";
-import {
-  getModuleCompletionToast,
-  type ModuleCompletionToast,
-} from "~/services/moduleCompletionService";
 import {
   getLastWatchPosition,
   calculateWatchProgress,
@@ -51,13 +43,8 @@ import {
   toggleBookmark,
 } from "~/services/bookmarkService";
 import { computeResult } from "~/services/quizScoringService";
-import {
-  awardXp,
-  awardQuizFirstPassXp,
-  LESSON_COMPLETION_XP,
-} from "~/services/gamificationService";
-import { recordStreakActivity } from "~/services/streakService";
-import { LessonProgressStatus, UserRole, XpSourceType } from "~/db/schema";
+import { awardQuizFirstPassXp } from "~/services/gamificationService";
+import { LessonProgressStatus, UserRole } from "~/db/schema";
 import { Button } from "~/components/ui/button";
 import { Textarea } from "~/components/ui/textarea";
 import { Card, CardContent } from "~/components/ui/card";
@@ -535,49 +522,21 @@ export async function action({ params, request }: Route.ActionArgs) {
   const intent = formData.get("intent");
 
   if (intent === "mark-complete") {
-    // Verify the lesson exists and belongs to this course before writing, so a
-    // crafted request can't complete a foreign lesson or hit a raw FK 500.
-    const lesson = getLessonById(lessonId);
-    const mod = lesson ? getModuleById(lesson.moduleId) : null;
-    if (!lesson || !mod || mod.courseId !== course.id) {
+    // The completion cascade (validation, progress, student-only XP + streak,
+    // module-completion toast, enrollment promotion) lives entirely in the
+    // service; the route only translates its typed result into HTTP.
+    const result = completeLesson({
+      userId: currentUserId,
+      lessonId,
+      courseId: course.id,
+    });
+    if (!result.ok) {
       return data(
         { error: "Lesson not found in this course." },
         { status: 404 }
       );
     }
-    // Capture prior completion state before writing, so re-completing a lesson
-    // (already complete) doesn't re-fire the module-completion toast below.
-    const wasAlreadyComplete = isLessonCompleted(currentUserId, lessonId);
-    markLessonComplete(currentUserId, lessonId);
-    // Award lesson-completion XP, but only for students — gamification is
-    // student-only, and instructors/admins viewing lessons shouldn't accrue XP.
-    // awardXp is idempotent per (user, source), so re-completing never duplicates.
-    let moduleCompletion: ModuleCompletionToast | null = null;
-    if (currentUser?.role === UserRole.Student) {
-      awardXp({
-        userId: currentUserId,
-        amount: LESSON_COMPLETION_XP,
-        sourceType: XpSourceType.LessonCompletion,
-        sourceId: lessonId,
-      });
-      // Record today's UTC streak activity. Idempotent per UTC day, so multiple
-      // completions in a day count once and re-completing never inflates it.
-      recordStreakActivity({ userId: currentUserId });
-      // If this completion finished the module, signal the client to toast the
-      // module's total XP. Null for a non-final lesson or a re-completion.
-      moduleCompletion = getModuleCompletionToast({
-        userId: currentUserId,
-        lessonId,
-        wasAlreadyComplete,
-      });
-    }
-    // Finishing the final lesson promotes the enrollment to "complete" (set-once).
-    // No-op for the instructor/admin viewers above who have no enrollment.
-    markEnrollmentCompleteIfFinished({
-      userId: currentUserId,
-      courseId: course.id,
-    });
-    return { success: true, moduleCompletion };
+    return { success: true, moduleCompletion: result.moduleCompletion };
   }
 
   if (intent === "toggle-bookmark") {

@@ -8,7 +8,7 @@ Break a PRD into independently-grabbable GitHub issues using vertical slices (tr
 
 Ask the user for the PRD GitHub issue number (or URL).
 
-If the PRD is not already in your context window, fetch it with `gh issue view <number>` (with comments).
+If the PRD is not already in your context window, fetch it with `gh issue view <number> -R jdg2896/cohort-004-project` (with comments). All issue operations target the fork `jdg2896/cohort-004-project`, never the upstream `ai-hero-dev` repo (which is where bare `gh` commands land because `origin` points there).
 
 ### 2. Explore the codebase (optional)
 
@@ -48,7 +48,7 @@ Iterate until the user approves the breakdown.
 
 ### 5. Create the GitHub issues
 
-For each approved slice, create a GitHub issue using `gh issue create`. Use the issue body template below.
+For each approved slice, create a GitHub issue using `gh issue create -R jdg2896/cohort-004-project` (always the fork, never upstream). Use the issue body template below.
 
 Create issues in dependency order (blockers first) so you can reference real issue numbers in the "Blocked by" field.
 

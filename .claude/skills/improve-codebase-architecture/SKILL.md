@@ -62,4 +62,4 @@ After comparing, give your own recommendation: which design you think is stronge
 
 ### 6. Create GitHub issue
 
-Create a refactor RFC as a GitHub issue using `gh issue create`. Use the template in [REFERENCE.md](REFERENCE.md). Do NOT ask the user to review before creating — just create it and share the URL.
+Create a refactor RFC as a GitHub issue using `gh issue create -R jdg2896/cohort-004-project`. Always target the fork `jdg2896/cohort-004-project` — never the upstream `ai-hero-dev` repo, which is where bare `gh issue create` lands because `origin` points there. Use the template in [REFERENCE.md](REFERENCE.md). Do NOT ask the user to review before creating — just create it and share the URL.
